@@ -4,7 +4,7 @@
  * Transform between unified ShipFlow types and Aymakan API formats.
  */
 
-import { WebhookVerificationError } from "../../core/errors";
+import { ValidationError, WebhookVerificationError } from "../../core/errors";
 import type {
   Address,
   City,
@@ -65,7 +65,12 @@ export function mapCreateShipmentRequest(
 ): AymakanCreateShipmentRequest {
   const firstParcel = input.parcels[0];
   const totalPieces = input.parcels.reduce((sum, p) => sum + p.pieces, 0);
-  const totalWeight = input.parcels.reduce((sum, p) => sum + p.weight.value, 0);
+  const totalWeight = input.parcels.reduce(
+    (sum, p) =>
+      sum +
+      (p.weight.unit === "lb" ? p.weight.value * 0.453592 : p.weight.value),
+    0,
+  );
   const totalItems = input.parcels.reduce(
     (sum, p) => sum + (p.itemsCount ?? p.pieces),
     0,
@@ -182,7 +187,7 @@ export function mapShipmentResponse(data: AymakanShipmentResponse): Shipment {
     trackingNumber: data.tracking_number,
     customerTracking: data.customer_tracking ?? undefined,
     reference: data.reference ?? undefined,
-    status: mapAymakanStatus(data.status) ?? "created",
+    status: mapAymakanStatus(data.status) || "created",
     statusLabel: data.status_label,
     labelUrl: data.label || undefined,
     pdfLabelUrl: data.pdf_label || undefined,
@@ -217,8 +222,14 @@ export function mapTrackingResult(
     deliveryDate: data.delivery_date ? new Date(data.delivery_date) : undefined,
     pickupDate: data.pickup_date ? new Date(data.pickup_date) : undefined,
     receivedAt: data.received_at ? new Date(data.received_at) : undefined,
-    codAmount: data.cod_amount ? parseFloat(data.cod_amount) : undefined,
-    weight: parseFloat(data.weight),
+    codAmount: data.cod_amount
+      ? Number.isNaN(parseFloat(data.cod_amount))
+        ? undefined
+        : parseFloat(data.cod_amount)
+      : undefined,
+    weight: Number.isNaN(parseFloat(data.weight))
+      ? undefined
+      : parseFloat(data.weight),
     pieces: data.pieces,
     raw: data,
   };
@@ -235,7 +246,11 @@ export function mapPickupResponse(data: AymakanPickupResponse["data"]): Pickup {
   return {
     id: data.id,
     carrier: "aymakan",
-    status: data.status as Pickup["status"],
+    status: (
+      ["pending", "processing", "completed", "cancelled"] as const
+    ).includes(data.status as Pickup["status"])
+      ? (data.status as Pickup["status"])
+      : "pending",
     date: data.pickup_date,
     timeSlot: data.time_slot,
     city: data.city,
@@ -255,7 +270,7 @@ export function mapPickupResponse(data: AymakanPickupResponse["data"]): Pickup {
 // ============================================================================
 
 export function parseAymakanWebhook(
-  payload: AymakanWebhookPayload,
+  payload: unknown,
   options?: {
     headers?: Record<string, string>;
     queryParams?: Record<string, string>;
@@ -264,9 +279,29 @@ export function parseAymakanWebhook(
 ): WebhookEvent {
   const { headers = {}, queryParams = {}, config } = options ?? {};
 
-  // Verify auth via header
+  // Validate required fields
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("tracking_number" in payload) ||
+    !("status" in payload)
+  ) {
+    throw new ValidationError(
+      "Invalid webhook payload: missing required fields",
+      {
+        raw: payload,
+      },
+    );
+  }
+
+  const data = payload as AymakanWebhookPayload;
+
+  // Verify auth via header (case-insensitive lookup)
   if (config?.authHeader && config?.authValue) {
-    const headerValue = headers[config.authHeader.toLowerCase()];
+    const lowerKey = config.authHeader.toLowerCase();
+    const headerValue = Object.entries(headers).find(
+      ([k]) => k.toLowerCase() === lowerKey,
+    )?.[1];
     if (headerValue !== config.authValue) {
       throw new WebhookVerificationError("Invalid webhook auth header", {
         carrier: "aymakan",
@@ -286,15 +321,15 @@ export function parseAymakanWebhook(
 
   return {
     carrier: "aymakan",
-    eventType: payload.event ?? "status_update",
-    trackingNumber: payload.tracking_number,
-    reference: payload.reference ?? undefined,
-    status: mapAymakanStatus(payload.status),
-    statusCode: payload.status,
-    statusLabel: payload.status_label,
-    reasonCode: payload.reason_code ?? undefined,
-    reasonLabel: payload.reason_en ?? undefined,
-    timestamp: new Date(payload.date_time),
-    raw: payload,
+    eventType: data.event ?? "status_update",
+    trackingNumber: data.tracking_number,
+    reference: data.reference ?? undefined,
+    status: mapAymakanStatus(data.status),
+    statusCode: data.status,
+    statusLabel: data.status_label,
+    reasonCode: data.reason_code ?? undefined,
+    reasonLabel: data.reason_en ?? undefined,
+    timestamp: new Date(data.date_time),
+    raw: data,
   };
 }

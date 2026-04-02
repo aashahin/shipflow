@@ -1,12 +1,12 @@
 // file: src/index.ts
 /**
  * ShipFlow - Unified Shipping SDK for MENA Region
- * 
+ *
  * @example
  * ```typescript
  * import { ShipFlow } from 'shipflow';
  * import { AymakanAdapter, AymakanService } from 'shipflow/carriers/aymakan';
- * 
+ *
  * const client = new ShipFlow({
  *   adapters: [
  *     new AymakanAdapter({
@@ -15,57 +15,76 @@
  *     })
  *   ]
  * });
- * 
+ *
  * const shipment = await client.carrier('aymakan').createShipment({...});
  * ```
  */
 
 // Client
-export { ShipFlow, createShipFlow, type ShipFlowOptions } from './client';
+export { ShipFlow, createShipFlow, type ShipFlowOptions } from "./client";
 
 // Core Types
 export type {
-    Address,
-    NationalAddress,
-    CustomerAddress,
-    Parcel,
-    Weight,
-    Dimensions,
-    CODDetails,
-    DeclaredValue,
-    CreateShipmentInput,
-    Shipment,
-    ShipmentStatus,
-    ShipmentOptions,
-    InternationalMetadata,
-    TrackingEvent,
-    TrackingResult,
-    PickupRequest,
-    Pickup,
-    TimeSlot,
-    City,
-    Location,
-    WebhookEvent,
-    WebhookEventType,
-    WebhookConfig,
-    Rate,
-    CarrierConfig,
-    CarrierCredentials,
-} from './core/types';
+  Address,
+  CODDetails,
+  CarrierConfig,
+  CarrierCredentials,
+  City,
+  CreateShipmentInput,
+  CustomerAddress,
+  DeclaredValue,
+  Dimensions,
+  InternationalMetadata,
+  Location,
+  NationalAddress,
+  Parcel,
+  Pickup,
+  PickupRequest,
+  Rate,
+  Shipment,
+  ShipmentOptions,
+  ShipmentStatus,
+  TimeSlot,
+  TrackingEvent,
+  TrackingResult,
+  WebhookConfig,
+  WebhookEvent,
+  WebhookEventType,
+  Weight,
+} from "./core/types";
 
 // Errors
 export {
-    ShipFlowError,
-    NetworkError,
-    APIError,
-    ValidationError,
-    AuthenticationError,
-    WebhookVerificationError,
-    UnsupportedOperationError,
-} from './core/errors';
+  APIError,
+  AuthenticationError,
+  NetworkError,
+  ShipFlowError,
+  UnsupportedOperationError,
+  ValidationError,
+  WebhookVerificationError,
+} from "./core/errors";
+
+// Validation Schemas
+export {
+  AddressSchema,
+  CODDetailsSchema,
+  CreateShipmentInputSchema,
+  DeclaredValueSchema,
+  DimensionsSchema,
+  ParcelSchema,
+  PickupRequestSchema,
+  WebhookConfigSchema,
+  WeightSchema,
+  validateCreateShipmentInput,
+  validatePickupRequest,
+} from "./core/schemas";
 
 // Base Adapter (for custom implementations)
-export { type CarrierAdapter, BaseCarrierAdapter } from './carriers/base';
+export { BaseCarrierAdapter, type CarrierAdapter } from "./carriers/base";
 
 // HTTP Client (for custom adapters)
-export { HttpClient, type HttpClientConfig, type RequestOptions } from './core/http';
+export {
+  HttpClient,
+  type HttpClientConfig,
+  type RequestOptions,
+} from "./core/http";

@@ -6,6 +6,10 @@
 
 import { APIError, UnsupportedOperationError } from "../../core/errors";
 import { HttpClient } from "../../core/http";
+import {
+  validateCreateShipmentInput,
+  validatePickupRequest,
+} from "../../core/schemas";
 import type {
   Address,
   CarrierConfig,
@@ -38,7 +42,6 @@ import type {
   AymakanCreateShipmentResponse,
   AymakanPickupResponse,
   AymakanTrackResponse,
-  AymakanWebhookPayload,
 } from "./types";
 
 const AYMAKAN_SANDBOX_URL = "https://dev-api.aymakan.com.sa/v2";
@@ -199,7 +202,9 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   // SHIPPING
   // =========================================================================
 
-  async createShipment(input: CreateShipmentInput): Promise<Shipment> {
+  protected async executeCreateShipment(
+    input: CreateShipmentInput,
+  ): Promise<Shipment> {
     await this.ensureCitiesLoaded();
     const resolved = this.resolveCitiesInInput(input);
     const request = mapCreateShipmentRequest(resolved);
@@ -221,6 +226,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async createBulkShipments(
     inputs: CreateShipmentInput[],
   ): Promise<Shipment[]> {
+    inputs.forEach(validateCreateShipmentInput);
     await this.ensureCitiesLoaded();
     const requests = inputs
       .map((i) => this.resolveCitiesInInput(i))
@@ -253,7 +259,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async cancelByReference(reference: string): Promise<boolean> {
     const response = await this.http.post<AymakanCancelResponse>(
-      `/shipping/cancel/reference/${reference}`,
+      `/shipping/cancel/reference/${encodeURIComponent(reference)}`,
     );
     return response.success;
   }
@@ -265,7 +271,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     await this.ensureCitiesLoaded();
     const resolvedCity = this.resolveCity(address.city);
     const response = await this.http.post<{ success: boolean }>(
-      `/shipping/update_delivery_address/${trackingNumber}`,
+      `/shipping/update_delivery_address/${encodeURIComponent(trackingNumber)}`,
       {
         delivery_name: address.name,
         delivery_email: address.email,
@@ -294,7 +300,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   }
 
   async trackMultiple(trackingNumbers: string[]): Promise<TrackingResult[]> {
-    const ids = trackingNumbers.join(",");
+    const ids = trackingNumbers.map(encodeURIComponent).join(",");
     const response = await this.http.get<AymakanTrackResponse>(
       `/shipping/track/${ids}`,
     );
@@ -311,7 +317,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async trackByReference(reference: string): Promise<TrackingResult> {
     const response = await this.http.get<AymakanTrackResponse>(
-      `/shipments/by_reference/${reference}`,
+      `/shipments/by_reference/${encodeURIComponent(reference)}`,
     );
 
     if (!response.success || !response.data.shipments[0]) {
@@ -330,12 +336,12 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async getLabel(
     trackingNumber: string,
-    _format?: "PDF" | "PNG",
+    format?: "PDF" | "PNG",
   ): Promise<string> {
     const response = await this.http.get<{
       success: boolean;
       data: { label: string; pdf_label: string; awb_url: string };
-    }>(`/shipping/awb/tracking/${trackingNumber}`);
+    }>(`/shipping/awb/tracking/${encodeURIComponent(trackingNumber)}`);
 
     if (!response.success) {
       throw new APIError("Failed to get label", {
@@ -344,9 +350,14 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    // Response format can be awb_url, pdf_label or label
+    // Prefer the format the caller requested
+    if (format === "PNG") {
+      return (
+        response.data.label || response.data.awb_url || response.data.pdf_label
+      );
+    }
     return (
-      response.data.awb_url || response.data.pdf_label || response.data.label
+      response.data.pdf_label || response.data.awb_url || response.data.label
     );
   }
 
@@ -376,6 +387,14 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.get<AymakanCitiesResponse>(
       "/pickup_request/cities",
     );
+
+    if (!response.success) {
+      throw new APIError("Failed to get pickup cities", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
+
     return response.data.cities.map(mapCity);
   }
 
@@ -404,7 +423,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   }
 
   async createPickup(input: PickupRequest): Promise<Pickup> {
-    const request = mapPickupRequest(input);
+    validatePickupRequest(input);
+    await this.ensureCitiesLoaded();
+    const resolvedInput = { ...input, city: this.resolveCity(input.city) };
+    const request = mapPickupRequest(resolvedInput);
     const response = await this.http.post<AymakanPickupResponse>(
       "/pickup_request/create",
       request,
@@ -422,7 +444,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async cancelPickup(pickupId: string | number): Promise<boolean> {
     const response = await this.http.post<{ success: boolean }>(
-      `/pickup_request/cancel/${pickupId}`,
+      `/pickup_request/cancel/${encodeURIComponent(String(pickupId))}`,
     );
     return response.success;
   }
@@ -433,6 +455,13 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       data: { pickup_requests: AymakanPickupResponse["data"][] };
     }>("/pickup_requests");
 
+    if (!response.success) {
+      throw new APIError("Failed to get pickup requests", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
+
     return response.data.pickup_requests.map(mapPickupResponse);
   }
 
@@ -442,6 +471,14 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async getCities(): Promise<City[]> {
     const response = await this.http.get<AymakanCitiesResponse>("/cities");
+
+    if (!response.success) {
+      throw new APIError("Failed to get cities", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
+
     return response.data.cities.map(mapCity);
   }
 
@@ -466,6 +503,13 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         }>;
       };
     }>("/dropoff_locations");
+
+    if (!response.success) {
+      throw new APIError("Failed to get dropoff locations", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
 
     return response.data.locations.map((loc) => ({
       id: String(loc.id),
@@ -517,6 +561,13 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       success: boolean;
       data: { addresses: AymakanAddressResponse["data"]["address"][] };
     }>("/addresses");
+
+    if (!response.success) {
+      throw new APIError("Failed to get customer addresses", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
 
     return response.data.addresses.map((addr) => ({
       id: addr.id,
@@ -594,7 +645,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       config?: WebhookConfig;
     },
   ): WebhookEvent {
-    return parseAymakanWebhook(payload as AymakanWebhookPayload, options);
+    return parseAymakanWebhook(payload, options);
   }
 
   // =========================================================================

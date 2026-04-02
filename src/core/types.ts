@@ -30,6 +30,7 @@ export interface Address {
   state?: string; // Province/region code
   postalCode?: string;
   countryCode: string; // ISO 3166-1 alpha-2
+  coordinates?: { latitude: number; longitude: number };
   description?: string;
   nationalAddress?: NationalAddress;
 }
@@ -143,6 +144,7 @@ export interface Shipment {
   statusLabel: string;
   labelUrl?: string;
   pdfLabelUrl?: string;
+  returnLabel?: string;
   codAmount?: number;
   declaredValue?: number;
   currency: string;

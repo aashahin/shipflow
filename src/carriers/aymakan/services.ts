@@ -49,7 +49,7 @@ export const AymakanStatusCodes = {
   "AY-0028": "in_transit", // In transit between hubs
 
   // Pending / rescheduled (delivery was attempted but rescheduled)
-  "AY-0032": "exception", // Pending — future delivery / rescheduled
+  "AY-0032": "pending", // Pending — future delivery / rescheduled
 
   // Terminal states
   "AY-0007": "returned", // Returned to shipper
