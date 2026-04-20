@@ -19,7 +19,7 @@ import type {
   WebhookConfig,
   WebhookEvent,
 } from "../../core/types";
-import { AymakanStatusCodes } from "./services";
+import { AymakanService, AymakanStatusCodes } from "./services";
 import type {
   AymakanAddressRequest,
   AymakanCity,
@@ -37,10 +37,10 @@ import type {
 // STATUS MAPPING
 // ============================================================================
 
-export function mapAymakanStatus(statusCode: string): ShipmentStatus {
+export function mapAymakanStatus(statusCode: string): ShipmentStatus | undefined {
   const mapped =
     AymakanStatusCodes[statusCode as keyof typeof AymakanStatusCodes];
-  return (mapped as ShipmentStatus) ?? "unknown";
+  return mapped as ShipmentStatus | undefined;
 }
 
 // ============================================================================
@@ -58,6 +58,26 @@ function mapNationalAddress(
     district: addr.district,
     additional_number: addr.additionalNumber,
   };
+}
+
+/** Strip non-digit characters from phone numbers (Aymakan requires digits only) */
+function sanitizePhone(phone: string): string {
+  return phone.replace(/\D/g, '');
+}
+
+/** Set of valid Aymakan service type codes */
+const VALID_AYMAKAN_SERVICE_TYPES = new Set(
+  Object.values(AymakanService) as string[],
+);
+
+/**
+ * Resolve service type to a valid Aymakan code.
+ * Returns undefined for unknown values so the API uses its default (ONP/ecommerce).
+ */
+function resolveServiceType(serviceType?: string): string | undefined {
+  if (!serviceType) return undefined;
+  if (VALID_AYMAKAN_SERVICE_TYPES.has(serviceType)) return serviceType;
+  return undefined;
 }
 
 export function mapCreateShipmentRequest(
@@ -83,7 +103,7 @@ export function mapCreateShipmentRequest(
       input.declaredValue?.currency ?? input.cod?.currency ?? "SAR",
     reference: input.reference,
     customer_tracking: input.options?.customerTracking,
-    service_type: input.serviceType ?? "ONP",
+    service_type: resolveServiceType(input.serviceType),
     is_cod: input.cod?.enabled ? 1 : 0,
     cod_amount: input.cod?.enabled ? input.cod.amount : undefined,
     fulfilment_customer_name: input.options?.fulfilmentCustomerName,
@@ -98,7 +118,7 @@ export function mapCreateShipmentRequest(
       input.consignee.neighbourhood ?? input.consignee.state,
     delivery_postcode: input.consignee.postalCode,
     delivery_country: input.consignee.countryCode,
-    delivery_phone: input.consignee.phone,
+    delivery_phone: sanitizePhone(input.consignee.phone),
     delivery_description: input.consignee.description,
     delivery_national_address: mapNationalAddress(
       input.consignee.nationalAddress,
@@ -113,7 +133,7 @@ export function mapCreateShipmentRequest(
       input.shipper.neighbourhood ?? input.shipper.state,
     collection_postcode: input.shipper.postalCode,
     collection_country: input.shipper.countryCode,
-    collection_phone: input.shipper.phone,
+    collection_phone: sanitizePhone(input.shipper.phone),
     collection_description: input.shipper.description,
     collection_national_address: mapNationalAddress(
       input.shipper.nationalAddress,
@@ -131,11 +151,11 @@ export function mapCreateShipmentRequest(
     // International
     international_metadata: input.options?.internationalMetadata
       ? {
-          document_id: input.options.internationalMetadata.documentId,
-          tax_identification_number: input.options.internationalMetadata.taxId,
-          invoice_number: input.options.internationalMetadata.invoiceNumber,
-          invoice_date: input.options.internationalMetadata.invoiceDate,
-        }
+        document_id: input.options.internationalMetadata.documentId,
+        tax_identification_number: input.options.internationalMetadata.taxId,
+        invoice_number: input.options.internationalMetadata.invoiceNumber,
+        invoice_date: input.options.internationalMetadata.invoiceDate,
+      }
       : undefined,
   };
 }
@@ -187,7 +207,7 @@ export function mapShipmentResponse(data: AymakanShipmentResponse): Shipment {
     trackingNumber: data.tracking_number,
     customerTracking: data.customer_tracking ?? undefined,
     reference: data.reference ?? undefined,
-    status: mapAymakanStatus(data.status) || "created",
+    status: mapAymakanStatus(data.status) ?? "created",
     statusLabel: data.status_label,
     labelUrl: data.label || undefined,
     pdfLabelUrl: data.pdf_label || undefined,
@@ -203,7 +223,7 @@ export function mapTrackingEvent(event: AymakanTrackingEvent): TrackingEvent {
   return {
     timestamp: new Date(event.created_at),
     statusCode: event.status_code,
-    status: mapAymakanStatus(event.status_code),
+    status: mapAymakanStatus(event.status_code) ?? "unknown",
     description: event.description,
     descriptionArabic: event.description_ar ?? undefined,
   };
@@ -216,7 +236,7 @@ export function mapTrackingResult(
     trackingNumber: data.tracking_number,
     carrier: "aymakan",
     reference: data.reference ?? undefined,
-    status: mapAymakanStatus(data.status),
+    status: mapAymakanStatus(data.status) ?? "unknown",
     statusLabel: data.status_label,
     events: data.tracking_info.map(mapTrackingEvent),
     deliveryDate: data.delivery_date ? new Date(data.delivery_date) : undefined,
@@ -269,6 +289,22 @@ export function mapPickupResponse(data: AymakanPickupResponse["data"]): Pickup {
 // WEBHOOK MAPPER
 // ============================================================================
 
+/**
+ * Timing-safe string comparison to prevent timing attacks on auth tokens.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  // Use crypto.subtle-compatible constant-time compare
+  let mismatch = 0;
+  for (let i = 0; i < bufA.byteLength; i++) {
+    mismatch |= bufA[i]! ^ bufB[i]!;
+  }
+  return mismatch === 0;
+}
+
 export function parseAymakanWebhook(
   payload: unknown,
   options?: {
@@ -296,40 +332,51 @@ export function parseAymakanWebhook(
 
   const data = payload as AymakanWebhookPayload;
 
-  // Verify auth via header (case-insensitive lookup)
+  // Verify auth via header (case-insensitive lookup, timing-safe comparison)
   if (config?.authHeader && config?.authValue) {
     const lowerKey = config.authHeader.toLowerCase();
     const headerValue = Object.entries(headers).find(
       ([k]) => k.toLowerCase() === lowerKey,
     )?.[1];
-    if (headerValue !== config.authValue) {
+    if (!headerValue || !timingSafeEqual(headerValue, config.authValue)) {
       throw new WebhookVerificationError("Invalid webhook auth header", {
         carrier: "aymakan",
       });
     }
   }
 
-  // Verify auth via query param
+  // Verify auth via query param (timing-safe comparison)
   if (config?.authQueryParam && config?.authQueryValue) {
     const paramValue = queryParams[config.authQueryParam];
-    if (paramValue !== config.authQueryValue) {
+    if (!paramValue || !timingSafeEqual(paramValue, config.authQueryValue)) {
       throw new WebhookVerificationError("Invalid webhook auth query param", {
         carrier: "aymakan",
       });
     }
   }
 
+  const eventType = data.event ?? "status_update";
+
+  // Validate timestamp
+  const timestamp = new Date(data.date_time);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new ValidationError(
+      "Invalid webhook payload: invalid date_time value",
+      { raw: data.date_time },
+    );
+  }
+
   return {
     carrier: "aymakan",
-    eventType: data.event ?? "status_update",
+    eventType,
     trackingNumber: data.tracking_number,
     reference: data.reference ?? undefined,
-    status: mapAymakanStatus(data.status),
+    status: eventType === "weight_update" ? "unknown" : (mapAymakanStatus(data.status) ?? "unknown"),
     statusCode: data.status,
     statusLabel: data.status_label,
     reasonCode: data.reason_code ?? undefined,
     reasonLabel: data.reason_en ?? undefined,
-    timestamp: new Date(data.date_time),
+    timestamp,
     raw: data,
   };
 }

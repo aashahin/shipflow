@@ -5,10 +5,10 @@
  * Requires: AYMAKAN_API_KEY and AYMAKAN_MODE=sandbox in .env
  */
 
-import { describe, test, expect, beforeAll } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 import { ShipFlow } from '../../src';
 import { AymakanAdapter, AymakanService } from '../../src/carriers/aymakan';
-import type { CreateShipmentInput, City, Pickup } from '../../src/core/types';
+import type { City, CreateShipmentInput } from '../../src/core/types';
 
 const API_KEY = process.env.AYMAKAN_API_KEY;
 const MODE = (process.env.AYMAKAN_MODE ?? 'sandbox') as 'sandbox' | 'production';

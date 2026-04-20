@@ -134,7 +134,7 @@ export interface CarrierAdapter {
   // WEBHOOKS
   // =========================================================================
 
-  /** Parse incoming webhook payload into normalized event */
+  /** Parse incoming webhook payload into a single normalized event */
   parseWebhook?(
     payload: unknown,
     options?: {
@@ -143,6 +143,16 @@ export interface CarrierAdapter {
       config?: WebhookConfig;
     },
   ): WebhookEvent;
+
+  /** Parse incoming webhook payload into multiple normalized events (batch) */
+  parseWebhookBatch?(
+    payload: unknown,
+    options?: {
+      headers?: Record<string, string>;
+      queryParams?: Record<string, string>;
+      config?: WebhookConfig;
+    },
+  ): WebhookEvent[];
 }
 
 /**

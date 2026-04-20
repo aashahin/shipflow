@@ -44,7 +44,7 @@ export function mapSMSAStatus(scanType: string): ShipmentStatus {
 
 /**
  * Derive the current shipment status from tracking scans.
- * Scans are ordered newest-first by the API, so the first scan is the latest.
+ * Defensively sorts by ScanDateTime descending before taking the latest.
  */
 function deriveStatusFromScans(
   scans: SMSATrackingScan[],
@@ -53,10 +53,15 @@ function deriveStatusFromScans(
   if (isDelivered) {
     return { status: "delivered", statusLabel: "Delivered" };
   }
-  const latest = scans[0];
-  if (!latest) {
+  if (scans.length === 0) {
     return { status: "unknown", statusLabel: "Unknown" };
   }
+  const sorted = [...scans].sort(
+    (a, b) =>
+      new Date(b.ScanDateTime).getTime() -
+      new Date(a.ScanDateTime).getTime(),
+  );
+  const latest = sorted[0]!;
   return {
     status: mapSMSAStatus(latest.ScanType),
     statusLabel: latest.ScanDescription,
@@ -226,10 +231,10 @@ export function mapTrackingResult(data: SMSATrackingResponse): TrackingResult {
   const deliveredScan = data.Scans.find((s) => s.ScanType === "DL");
   const deliveredTimestamp = deliveredScan
     ? new Date(
-        deliveredScan.ScanTimeZone
-          ? `${deliveredScan.ScanDateTime}${deliveredScan.ScanTimeZone}`
-          : deliveredScan.ScanDateTime,
-      )
+      deliveredScan.ScanTimeZone
+        ? `${deliveredScan.ScanDateTime}${deliveredScan.ScanTimeZone}`
+        : deliveredScan.ScanDateTime,
+    )
     : undefined;
 
   return {
@@ -306,6 +311,21 @@ export function mapCreate2WayRequest(
 // WEBHOOK MAPPERS
 // ============================================================================
 
+/**
+ * Timing-safe string comparison to prevent timing attacks on auth tokens.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  let mismatch = 0;
+  for (let i = 0; i < bufA.byteLength; i++) {
+    mismatch |= bufA[i]! ^ bufB[i]!;
+  }
+  return mismatch === 0;
+}
+
 function verifyWebhookAuth(options?: {
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;
@@ -313,23 +333,23 @@ function verifyWebhookAuth(options?: {
 }): void {
   const { headers = {}, queryParams = {}, config } = options ?? {};
 
-  // Verify auth via header (case-insensitive lookup)
+  // Verify auth via header (case-insensitive lookup, timing-safe comparison)
   if (config?.authHeader && config?.authValue) {
     const lowerKey = config.authHeader.toLowerCase();
     const headerValue = Object.entries(headers).find(
       ([k]) => k.toLowerCase() === lowerKey,
     )?.[1];
-    if (headerValue !== config.authValue) {
+    if (!headerValue || !timingSafeEqual(headerValue, config.authValue)) {
       throw new WebhookVerificationError("Invalid webhook auth header", {
         carrier: "smsaexpress",
       });
     }
   }
 
-  // Verify auth via query param (SMSA uses API key as query param)
+  // Verify auth via query param (SMSA uses API key as query param, timing-safe)
   if (config?.authQueryParam && config?.authQueryValue) {
     const paramValue = queryParams[config.authQueryParam];
-    if (paramValue !== config.authQueryValue) {
+    if (!paramValue || !timingSafeEqual(paramValue, config.authQueryValue)) {
       throw new WebhookVerificationError("Invalid webhook auth query param", {
         carrier: "smsaexpress",
       });
@@ -345,13 +365,19 @@ function mapWebhookShipmentToEvent(
     shipment.isDelivered,
   );
 
-  const latestScan = shipment.Scans[0];
+  // Sort scans descending to get the latest one for timestamp/statusCode
+  const sorted = [...shipment.Scans].sort(
+    (a, b) =>
+      new Date(b.ScanDateTime).getTime() -
+      new Date(a.ScanDateTime).getTime(),
+  );
+  const latestScan = sorted[0];
   const timestamp = latestScan
     ? new Date(
-        latestScan.ScanTimeZone
-          ? `${latestScan.ScanDateTime}${latestScan.ScanTimeZone}`
-          : latestScan.ScanDateTime,
-      )
+      latestScan.ScanTimeZone
+        ? `${latestScan.ScanDateTime}${latestScan.ScanTimeZone}`
+        : latestScan.ScanDateTime,
+    )
     : new Date();
 
   return {
