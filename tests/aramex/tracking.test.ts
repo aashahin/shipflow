@@ -15,6 +15,7 @@ import {
   test,
 } from "bun:test";
 import { AramexAdapter } from "../../src/carriers/aramex";
+import { APIError } from "../../src/core/errors";
 
 const originalFetch = globalThis.fetch;
 const mockFetch = mock(async () => new Response());
@@ -161,6 +162,63 @@ describe("AramexAdapter — tracking", () => {
 
     const result = await adapter.track("47384200003");
     expect(result.status).toBe("exception");
+  });
+
+  test("surfaces NonExistingWaybills as 'unknown' results so inputs stay aligned", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json({
+        HasErrors: false,
+        Notifications: [],
+        // Only the first waybill was found; the second is not-found.
+        TrackingResults: [{ Key: "47384200001", Value: events() }],
+        NonExistingWaybills: ["99999999999"],
+      }),
+    );
+
+    const results = await adapter.trackMultiple([
+      "47384200001",
+      "99999999999",
+    ]);
+
+    expect(results).toHaveLength(2);
+    const byNumber = Object.fromEntries(
+      results.map((r) => [r.trackingNumber, r]),
+    );
+    expect(byNumber["47384200001"]!.status).toBe("delivered");
+    const missing = byNumber["99999999999"]!;
+    expect(missing.status).toBe("unknown");
+    expect(missing.events).toHaveLength(0);
+    expect(missing.statusLabel).toBe("Waybill not found");
+  });
+
+  test("track() throws a precise not-found for a NonExistingWaybill", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json({
+        HasErrors: false,
+        Notifications: [],
+        TrackingResults: [],
+        NonExistingWaybills: ["99999999999"],
+      }),
+    );
+
+    const error = await adapter
+      .track("99999999999")
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(APIError);
+    expect((error as APIError).message).toContain("not found");
+  });
+
+  test("track() throws not-found when the waybill is in neither bucket", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json({
+        HasErrors: false,
+        Notifications: [],
+        TrackingResults: [],
+        NonExistingWaybills: [],
+      }),
+    );
+
+    await expect(adapter.track("00000000000")).rejects.toThrow(APIError);
   });
 
   test("trackByReference echoes the reference back", async () => {

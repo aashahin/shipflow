@@ -540,6 +540,24 @@ export function normalizeTrackingResults(
   return raw;
 }
 
+/**
+ * Build a placeholder `TrackingResult` for a waybill Aramex reports under
+ * `NonExistingWaybills`. Aramex splits the TrackShipments response into found
+ * (`TrackingResults`) and not-found (`NonExistingWaybills`) buckets; emitting an
+ * "unknown" entry for the latter keeps the returned array aligned to the input
+ * waybills so callers can map inputs→results positionally/by trackingNumber.
+ */
+export function mapNonExistingWaybill(waybill: string): TrackingResult {
+  return {
+    trackingNumber: waybill,
+    carrier: "aramex",
+    status: "unknown",
+    statusLabel: "Waybill not found",
+    events: [],
+    raw: { nonExisting: true, waybill },
+  };
+}
+
 export function mapRate(
   response: AramexCalculateRateResponse,
   input: CreateShipmentInput,
@@ -563,6 +581,11 @@ export function mapPickupResponse(
   processed: AramexProcessedPickup,
   input: PickupRequest,
 ): Pickup {
+  // CancelPickup keys on the GUID (PickupGUID), NOT the numeric ID — a pickup
+  // that also carries an ID must still surface the GUID as its `id` so the
+  // round-trip createPickup → cancelPickup works. Prefer GUID; only fall back
+  // to ID when no GUID is present (cancellation then isn't possible, but the
+  // caller still gets a usable identifier).
   return {
     id: processed.GUID || processed.ID,
     carrier: "aramex",

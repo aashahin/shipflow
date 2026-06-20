@@ -17,7 +17,7 @@ import {
   test,
 } from "bun:test";
 import { AymakanAdapter } from "../../src/carriers/aymakan";
-import { ValidationError } from "../../src/core/errors";
+import { APIError, ValidationError } from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -370,6 +370,213 @@ describe("Aymakan audit regression", () => {
 
       expect(event.eventType).toBe("weight_update");
       expect(event.status).toBe("delivered");
+    });
+  });
+
+  // ==========================================================================
+  // DEEP-REVIEW FIXES
+  // ==========================================================================
+
+  describe("COD vs declared value separation", () => {
+    test("declared_value never falls back to the COD amount", async () => {
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          shipping: {
+            tracking_number: "AY200",
+            reference: null,
+            status: "AY-0001",
+            status_label: "AWB created at origin",
+            cod_amount: 150,
+            declared_value: 0,
+            currency: "SAR",
+            created_at: "2026-01-22T10:00:00.000000Z",
+            weight: 1,
+            pieces: 1,
+            is_reverse_pickup: 0,
+            label: "",
+            pdf_label: "",
+          },
+        }),
+      );
+
+      // COD is enabled with 150 but NO declaredValue is provided.
+      await adapter.createShipment({
+        ...sampleInput(),
+        cod: { enabled: true, amount: 150, currency: "USD" },
+      });
+
+      const [, init] = lastCall();
+      const body = JSON.parse(init.body as string);
+      // declared_value must NOT borrow the COD amount.
+      expect(body.declared_value).toBe(0);
+      expect(body.declared_value_currency).toBe("SAR");
+      expect(body.is_cod).toBe(1);
+      expect(body.cod_amount).toBe(150);
+      // Top-level currency prefers the COD currency when COD is enabled.
+      expect(body.currency).toBe("USD");
+    });
+
+    test("uses declaredValue currency for top-level currency when COD is disabled", async () => {
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          shipping: {
+            tracking_number: "AY201",
+            reference: null,
+            status: "AY-0001",
+            status_label: "AWB created at origin",
+            cod_amount: null,
+            declared_value: 99,
+            currency: "USD",
+            created_at: "2026-01-22T10:00:00.000000Z",
+            weight: 1,
+            pieces: 1,
+            is_reverse_pickup: 0,
+            label: "",
+            pdf_label: "",
+          },
+        }),
+      );
+
+      await adapter.createShipment({
+        ...sampleInput(),
+        declaredValue: { amount: 99, currency: "USD" },
+      });
+
+      const [, init] = lastCall();
+      const body = JSON.parse(init.body as string);
+      expect(body.is_cod).toBe(0);
+      expect(body.cod_amount).toBeUndefined();
+      expect(body.declared_value).toBe(99);
+      expect(body.declared_value_currency).toBe("USD");
+      expect(body.currency).toBe("USD");
+    });
+  });
+
+  describe("fake-200 error envelopes surface as APIError", () => {
+    test("cancelShipment throws on a 200 error envelope instead of returning false", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({ error: true, response: "Shipment cannot be cancelled" }),
+      );
+
+      const promise = adapter.cancelShipment("AY999");
+      await expect(promise).rejects.toThrow(APIError);
+      await expect(promise).rejects.toThrow("Shipment cannot be cancelled");
+    });
+
+    test("cancelByReference throws on a 200 error envelope", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({ success: false, message: "Reference not found" }),
+      );
+
+      await expect(adapter.cancelByReference("REF-X")).rejects.toThrow(
+        "Reference not found",
+      );
+    });
+
+    test("cancelPickup throws on a 200 error envelope", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({ error: true, message: "Pickup already cancelled" }),
+      );
+
+      await expect(adapter.cancelPickup(7)).rejects.toThrow(
+        "Pickup already cancelled",
+      );
+    });
+
+    test("a successful cancel still returns true", async () => {
+      mockFetch.mockResolvedValueOnce(json({ success: true, message: "ok" }));
+      expect(await adapter.cancelShipment("AY1")).toBe(true);
+    });
+  });
+
+  describe("track human-label status fallback", () => {
+    test("recovers a real status from the /track human label when there are no events", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          data: {
+            shipments: [
+              {
+                tracking_number: "AY1",
+                reference: null,
+                status: "Received at Warehouse", // human label, no events
+                status_label: "Received at Warehouse",
+                cod_amount: null,
+                weight: "1.00",
+                pieces: 1,
+                tracking_info: [],
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await adapter.track("AY1");
+      expect(result.status).toBe("at_warehouse");
+    });
+  });
+
+  describe("zero-COD handling on create", () => {
+    test("a parsed COD of 0 yields undefined codAmount (not NaN-dropped)", async () => {
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          shipping: {
+            tracking_number: "AY300",
+            reference: null,
+            status: "AY-0001",
+            status_label: "AWB created at origin",
+            cod_amount: "0.00",
+            declared_value: 50,
+            currency: "SAR",
+            created_at: "2026-01-22T10:00:00.000000Z",
+            weight: 1,
+            pieces: 1,
+            is_reverse_pickup: 0,
+            label: "",
+            pdf_label: "",
+          },
+        }),
+      );
+
+      const shipment = await adapter.createShipment(sampleInput());
+      expect(shipment.codAmount).toBeUndefined();
+    });
+  });
+
+  describe("response shape guards", () => {
+    test("createBulkShipments returns [] for empty input without any request", async () => {
+      const result = await adapter.createBulkShipments([]);
+      expect(result).toEqual([]);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test("createBulkShipments throws a clean APIError when shipments array is missing", async () => {
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(json({ success: true }));
+
+      await expect(
+        adapter.createBulkShipments([sampleInput()]),
+      ).rejects.toThrow(APIError);
+    });
+
+    test("trackMultiple throws a clean APIError when data.shipments is missing", async () => {
+      mockFetch.mockResolvedValueOnce(json({ success: true, data: {} }));
+
+      await expect(adapter.trackMultiple(["AY1"])).rejects.toThrow(APIError);
+    });
+
+    test("getPickupRequests throws a clean APIError when nested data is missing", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({ success: true, data: { pickupRequests: {} } }),
+      );
+
+      await expect(adapter.getPickupRequests()).rejects.toThrow(APIError);
     });
   });
 });

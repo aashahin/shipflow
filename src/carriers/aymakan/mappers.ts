@@ -43,6 +43,48 @@ export function mapAymakanStatus(statusCode: string): ShipmentStatus | undefined
   return mapped as ShipmentStatus | undefined;
 }
 
+/**
+ * The /track endpoint's top-level `status` is a human-readable English label
+ * (e.g. "Received at Warehouse") rather than an AY code, so `mapAymakanStatus`
+ * can never resolve it. This map recovers a real unified status from that label
+ * when there are no tracking events to derive it from. Keys are compared
+ * case-insensitively.
+ */
+const AymakanStatusLabels: Record<string, ShipmentStatus> = {
+  "awb created at origin": "created",
+  "shipment created": "created",
+  "collected from collection point": "picked_up",
+  collected: "picked_up",
+  "picked up": "picked_up",
+  "received at hub": "at_warehouse",
+  "received at warehouse": "at_warehouse",
+  "out for delivery": "out_for_delivery",
+  "out for final destination": "out_for_delivery",
+  delivered: "delivered",
+  "shipment is delivered": "delivered",
+  "transferred to destination city": "in_transit",
+  "in transit": "in_transit",
+  "not delivered": "exception",
+  "failed attempt": "exception",
+  pending: "pending",
+  "future delivery": "pending",
+  returned: "returned",
+  "returned to shipper": "returned",
+  "return to origin": "returned",
+  cancelled: "cancelled",
+  canceled: "cancelled",
+};
+
+/**
+ * Map a human-readable Aymakan status label to a unified status.
+ * Returns undefined for unrecognized labels.
+ */
+export function mapAymakanStatusLabel(
+  label: string,
+): ShipmentStatus | undefined {
+  return AymakanStatusLabels[label.trim().toLowerCase()];
+}
+
 // ============================================================================
 // REQUEST MAPPERS
 // ============================================================================
@@ -96,18 +138,27 @@ export function mapCreateShipmentRequest(
     0,
   );
 
+  // COD (collected from the buyer on delivery) and declared/customs value are
+  // distinct concepts and must never be conflated. Declared value comes solely
+  // from input.declaredValue; COD comes solely from input.cod.
+  const codEnabled = input.cod?.enabled === true;
+  const declaredValueCurrency = input.declaredValue?.currency ?? "SAR";
+
   return {
     requested_by: input.options?.requestedBy ?? input.shipper.name,
-    declared_value: input.declaredValue?.amount ?? input.cod?.amount ?? 0,
-    declared_value_currency:
-      input.declaredValue?.currency ?? input.cod?.currency ?? "SAR",
+    declared_value: input.declaredValue?.amount ?? 0,
+    declared_value_currency: declaredValueCurrency,
     reference: input.reference,
     customer_tracking: input.options?.customerTracking,
     service_type: resolveServiceType(input.serviceType),
-    is_cod: input.cod?.enabled ? 1 : 0,
-    cod_amount: input.cod?.enabled ? input.cod.amount : undefined,
+    is_cod: codEnabled ? 1 : 0,
+    cod_amount: codEnabled ? input.cod?.amount : undefined,
     fulfilment_customer_name: input.options?.fulfilmentCustomerName,
-    currency: input.cod?.currency ?? "SAR",
+    // Top-level currency prefers the COD currency when COD is enabled (it's the
+    // amount actually collected), otherwise the declared-value currency.
+    currency: codEnabled
+      ? (input.cod?.currency ?? "SAR")
+      : declaredValueCurrency,
 
     // Delivery (consignee)
     delivery_name: input.consignee.name,
@@ -211,7 +262,13 @@ export function mapShipmentResponse(data: AymakanShipmentResponse): Shipment {
     statusLabel: data.status_label,
     labelUrl: data.label || undefined,
     pdfLabelUrl: data.pdf_label || undefined,
-    codAmount: codAmount && !Number.isNaN(codAmount) ? codAmount : undefined,
+    // Emit a defined COD amount whenever we parsed a real number. A COD of 0
+    // means "no cash collected", so surface it as undefined, but never let NaN
+    // logic on a falsy 0 drop an otherwise valid value.
+    codAmount:
+      codAmount != null && !Number.isNaN(codAmount) && codAmount !== 0
+        ? codAmount
+        : undefined,
     declaredValue: data.declared_value,
     currency: data.currency,
     createdAt: new Date(data.created_at),
@@ -251,7 +308,9 @@ export function mapTrackingResult(
   // endpoint (e.g. "Received at Warehouse") and an AY code on /by_reference.
   // Derive the unified status from the most recent tracking event (whose
   // status_code is always an AY code), falling back to mapping the top-level
-  // status, then "unknown".
+  // status. The fallback tries the AY-code map first (handles /by_reference)
+  // and then the human-label map (handles /track), so a real state is recovered
+  // even when there are no events, then "unknown".
   const latestEvent = events.length
     ? [...events].sort(
         (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
@@ -261,7 +320,11 @@ export function mapTrackingResult(
   if (latestEvent && latestEvent.status !== "unknown") {
     status = latestEvent.status;
   } else {
-    status = mapAymakanStatus(data.status) ?? latestEvent?.status ?? "unknown";
+    status =
+      mapAymakanStatus(data.status) ??
+      mapAymakanStatusLabel(data.status) ??
+      latestEvent?.status ??
+      "unknown";
   }
 
   return {

@@ -47,16 +47,18 @@ export function mapSMSAStatus(scanType: string): ShipmentStatus {
  * Defensively sorts by ScanDateTime descending before taking the latest.
  */
 function deriveStatusFromScans(
-  scans: SMSATrackingScan[],
+  scans: SMSATrackingScan[] | undefined,
   isDelivered?: boolean,
 ): { status: ShipmentStatus; statusLabel: string } {
   if (isDelivered) {
     return { status: "delivered", statusLabel: "Delivered" };
   }
-  if (scans.length === 0) {
+  // Records may omit Scans entirely (freshly-booked AWB, partial bulk record).
+  const safeScans = scans ?? [];
+  if (safeScans.length === 0) {
     return { status: "unknown", statusLabel: "Unknown" };
   }
-  const sorted = [...scans].sort(
+  const sorted = [...safeScans].sort(
     (a, b) =>
       new Date(b.ScanDateTime).getTime() -
       new Date(a.ScanDateTime).getTime(),
@@ -71,6 +73,14 @@ function deriveStatusFromScans(
 // ============================================================================
 // REQUEST MAPPERS
 // ============================================================================
+
+/**
+ * Round a weight to 3 decimal places to avoid float-arithmetic noise
+ * (e.g. 0.1 + 0.2 = 0.30000000000000004) leaking into the API payload.
+ */
+function roundWeight(weight: number): number {
+  return Math.round(weight * 1000) / 1000;
+}
 
 function mapAddress(
   addr: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
@@ -126,9 +136,14 @@ export function mapCreateB2CRequest(
     ContentDescription: input.parcels[0]?.description ?? "Shipment contents",
     Parcels: totalPieces,
     ShipDate: new Date().toISOString().slice(0, 19),
+    // When COD is enabled, its currency is the amount physically collected
+    // and must win over the declared-value currency.
     ShipmentCurrency:
-      input.declaredValue?.currency ?? input.cod?.currency ?? "SAR",
-    Weight: totalWeight,
+      (input.cod?.enabled ? input.cod.currency : undefined) ??
+      input.declaredValue?.currency ??
+      input.cod?.currency ??
+      "SAR",
+    Weight: roundWeight(totalWeight),
     WeightUnit: "KG",
     WaybillType: input.labelFormat === "ZPL" ? "ZPL" : "PDF",
     ServiceCode: input.serviceType,
@@ -163,9 +178,14 @@ export function mapCreateC2BRequest(
       input.parcels[0]?.description ?? "Return shipment contents",
     Parcels: totalPieces,
     ShipDate: new Date().toISOString().slice(0, 19),
+    // When COD is enabled, its currency is the amount physically collected
+    // and must win over the declared-value currency.
     ShipmentCurrency:
-      input.declaredValue?.currency ?? input.cod?.currency ?? "SAR",
-    Weight: totalWeight,
+      (input.cod?.enabled ? input.cod.currency : undefined) ??
+      input.declaredValue?.currency ??
+      input.cod?.currency ??
+      "SAR",
+    Weight: roundWeight(totalWeight),
     WeightUnit: "KG",
     WaybillType: input.labelFormat === "ZPL" ? "ZPL" : "PDF",
     ServiceCode: input.serviceType ?? "EDCR",
@@ -199,15 +219,25 @@ export function mapShipmentResponse(
     statusLabel: "Created",
     codAmount: input.cod?.enabled ? input.cod.amount : undefined,
     declaredValue: input.declaredValue?.amount,
-    currency: input.declaredValue?.currency ?? input.cod?.currency ?? "SAR",
+    // When COD is enabled, its currency is the amount physically collected
+    // and must win over the declared-value currency.
+    currency:
+      (input.cod?.enabled ? input.cod.currency : undefined) ??
+      input.declaredValue?.currency ??
+      input.cod?.currency ??
+      "SAR",
     returnLabel: firstWaybill?.returnBarcode
       ? `data:application/pdf;base64,${firstWaybill.returnBarcode}`
       : undefined,
-    createdAt: new Date(
-      /[Z]$|[+-]\d{2}(:\d{2})?$/.test(data.createDate)
-        ? data.createDate
-        : `${data.createDate}+03:00`,
-    ),
+    // Guard a missing createDate so we never build `new Date("undefined+03:00")`
+    // (Invalid Date). Append the SMSA timezone (+03:00) only to bare timestamps.
+    createdAt: data.createDate
+      ? new Date(
+          /[Z]$|[+-]\d{2}(:\d{2})?$/.test(data.createDate)
+            ? data.createDate
+            : `${data.createDate}+03:00`,
+        )
+      : new Date(),
     raw: data,
   };
 }
@@ -227,12 +257,13 @@ export function mapTrackingEvent(scan: SMSATrackingScan): TrackingEvent {
 }
 
 export function mapTrackingResult(data: SMSATrackingResponse): TrackingResult {
-  const { status, statusLabel } = deriveStatusFromScans(
-    data.Scans,
-    data.isDelivered,
-  );
+  // Real API records (freshly-booked AWB, partial bulk record) may omit Scans
+  // entirely; default to [] so a scan-less record yields "unknown" instead of
+  // throwing (and failing the whole trackMultiple batch).
+  const scans = data.Scans ?? [];
+  const { status, statusLabel } = deriveStatusFromScans(scans, data.isDelivered);
 
-  const deliveredScan = data.Scans.find((s) => s.ScanType === "DL");
+  const deliveredScan = scans.find((s) => s.ScanType === "DL");
   const deliveredTimestamp = deliveredScan
     ? new Date(
       deliveredScan.ScanTimeZone
@@ -247,7 +278,7 @@ export function mapTrackingResult(data: SMSATrackingResponse): TrackingResult {
     reference: data.Reference || undefined,
     status,
     statusLabel,
-    events: data.Scans.map(mapTrackingEvent),
+    events: scans.map(mapTrackingEvent),
     deliveryDate: deliveredTimestamp,
     codAmount: data.CODAmount > 0 ? data.CODAmount : undefined,
     pieces: data.Pieces,
@@ -304,7 +335,7 @@ export function mapCreate2WayRequest(
     Parcels: totalPieces,
     ShipDate: new Date().toISOString().slice(0, 19),
     ShipmentCurrency: input.declaredValue?.currency ?? "SAR",
-    Weight: totalWeight,
+    Weight: roundWeight(totalWeight),
     WeightUnit: "KG",
     WaybillType: input.labelFormat === "ZPL" ? "ZPL" : "PDF",
     SMSARetailID: (input.options?.metadata?.smsaRetailId as string) ?? "0",
@@ -366,13 +397,16 @@ function verifyWebhookAuth(options?: {
 function mapWebhookShipmentToEvent(
   shipment: SMSAWebhookShipment,
 ): WebhookEvent {
+  // A webhook record may arrive without Scans; default to [] so a scan-less
+  // shipment yields "unknown" instead of throwing.
+  const scans = shipment.Scans ?? [];
   const { status, statusLabel } = deriveStatusFromScans(
-    shipment.Scans,
+    scans,
     shipment.isDelivered,
   );
 
   // Sort scans descending to get the latest one for timestamp/statusCode
-  const sorted = [...shipment.Scans].sort(
+  const sorted = [...scans].sort(
     (a, b) =>
       new Date(b.ScanDateTime).getTime() -
       new Date(a.ScanDateTime).getTime(),

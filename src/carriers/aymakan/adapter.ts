@@ -51,6 +51,57 @@ import type {
 const AYMAKAN_SANDBOX_URL = "https://dev-api.aymakan.com.sa/v2";
 const AYMAKAN_PRODUCTION_URL = "https://api.aymakan.net/v2";
 
+/**
+ * Aymakan returns logical errors inside a fake-200 envelope (HTTP 200 with an
+ * error flag/message in the body). Without an extractor these are swallowed —
+ * e.g. cancel endpoints would return `success: undefined` and the adapter would
+ * report `false` with no reason. This extractor surfaces those as APIError.
+ *
+ * Recognised error shapes (all on a 200 body):
+ * - `{ error: true, ... }`            → Laravel/Aymakan error flag
+ * - `{ success: false, ... }`         → explicit failure flag
+ * - `{ message }` / `{ response }`    → human-readable error text
+ * - `{ errors: { field: [...] } }`    → Laravel field validation errors
+ *
+ * A bare `{ message }` is NOT treated as an error on its own (many success
+ * envelopes carry a `message`); we only flag when `error`/`success:false` is
+ * present, or validation `errors` exist.
+ */
+function aymakanErrorExtractor(json: unknown): {
+  hasError: boolean;
+  message?: string;
+  errors?: Record<string, string[]>;
+} {
+  if (!json || typeof json !== "object") {
+    return { hasError: false };
+  }
+  const obj = json as Record<string, unknown>;
+
+  const hasValidationErrors =
+    !!obj.errors &&
+    typeof obj.errors === "object" &&
+    Object.keys(obj.errors as object).length > 0;
+  const hasError = obj.error === true || obj.success === false || hasValidationErrors;
+
+  if (!hasError) {
+    return { hasError: false };
+  }
+
+  const message =
+    (typeof obj.message === "string" && obj.message) ||
+    (typeof obj.response === "string" && obj.response) ||
+    (typeof obj.error === "string" && obj.error) ||
+    undefined;
+
+  return {
+    hasError: true,
+    message,
+    errors: hasValidationErrors
+      ? (obj.errors as Record<string, string[]>)
+      : undefined,
+  };
+}
+
 export interface AymakanConfig extends CarrierConfig {
   credentials: {
     apiKey: string;
@@ -62,6 +113,12 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   readonly supportedCountries = ["SA", "AE", "BH", "KW", "OM", "QA"];
 
   private http: HttpClient;
+
+  /**
+   * Shared options applied to every Aymakan http call so fake-200 error
+   * envelopes surface as APIError instead of being silently swallowed.
+   */
+  private readonly errorOpts = { errorExtractor: aymakanErrorExtractor };
 
   /** Cached Aymakan cities list for city name resolution */
   private citiesCache: City[] | null = null;
@@ -215,6 +272,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<AymakanCreateShipmentResponse>(
       "/shipping/create",
       request,
+      this.errorOpts,
     );
 
     if (!response.success) {
@@ -230,6 +288,8 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async createBulkShipments(
     inputs: CreateShipmentInput[],
   ): Promise<Shipment[]> {
+    // Nothing to create — avoid an empty request to the carrier.
+    if (inputs.length === 0) return [];
     // Aymakan rejects batches larger than 30 ("Only 30 shipments can be
     // created at a time."), so fail fast with a clear error before the request.
     if (inputs.length > 30) {
@@ -249,7 +309,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       bulk_awb?: string;
       total_shipments?: number;
       shipments: AymakanCreateShipmentResponse["shipping"][];
-    }>("/shipping/create/bulk_shipping", { shipments: requests });
+    }>("/shipping/create/bulk_shipping", { shipments: requests }, this.errorOpts);
 
     if (!response.success) {
       throw new APIError("Failed to create bulk shipments", {
@@ -258,16 +318,26 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
+    if (!Array.isArray(response.shipments)) {
+      throw new APIError(
+        "Aymakan bulk create response is missing the shipments array",
+        { carrier: "aymakan", raw: response },
+      );
+    }
+
     return response.shipments.map(mapShipmentResponse);
   }
 
   async cancelShipment(trackingNumber: string): Promise<boolean> {
-    // Try passing as body
+    // The errorExtractor surfaces fake-200 error envelopes as APIError, so a
+    // real failure throws with the carrier's message rather than silently
+    // returning false.
     const response = await this.http.post<AymakanCancelResponse>(
       "/shipping/cancel",
       {
         tracking: trackingNumber,
       },
+      this.errorOpts,
     );
     return response.success === true;
   }
@@ -276,6 +346,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<AymakanCancelResponse>(
       "/shipping/cancel_by_reference",
       { reference },
+      this.errorOpts,
     );
     return response.success === true;
   }
@@ -319,10 +390,18 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const ids = trackingNumbers.map(encodeURIComponent).join(",");
     const response = await this.http.get<AymakanTrackResponse>(
       `/shipping/track/${ids}`,
+      this.errorOpts,
     );
 
     if (!response.success) {
       throw new APIError("Failed to track shipments", {
+        carrier: "aymakan",
+        raw: response,
+      });
+    }
+
+    if (!Array.isArray(response.data?.shipments)) {
+      throw new APIError("Aymakan track response is missing data.shipments", {
         carrier: "aymakan",
         raw: response,
       });
@@ -334,16 +413,18 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async trackByReference(reference: string): Promise<TrackingResult> {
     const response = await this.http.get<AymakanTrackResponse>(
       `/shipping/by_reference/${encodeURIComponent(reference)}`,
+      this.errorOpts,
     );
 
-    if (!response.success || !response.data.shipments[0]) {
+    const shipment = response.data?.shipments?.[0];
+    if (!response.success || !shipment) {
       throw new APIError("Shipment not found", {
         carrier: "aymakan",
         raw: response,
       });
     }
 
-    return mapTrackingResult(response.data.shipments[0]);
+    return mapTrackingResult(shipment);
   }
 
   // =========================================================================
@@ -362,7 +443,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       message?: string;
       response?: string;
       data: { awb_url: string };
-    }>(`/shipping/awb/tracking/${encodeURIComponent(trackingNumber)}`);
+    }>(
+      `/shipping/awb/tracking/${encodeURIComponent(trackingNumber)}`,
+      this.errorOpts,
+    );
 
     if (!response.success || !response.data?.awb_url) {
       const msg = response.message ?? response.response ?? "Failed to get label";
@@ -381,7 +465,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       message?: string;
       response?: string;
       data: { bulk_awb_url: string };
-    }>(`/shipping/bulk_awb/trackings/${ids}`);
+    }>(`/shipping/bulk_awb/trackings/${ids}`, this.errorOpts);
 
     if (!response.success || !response.data?.bulk_awb_url) {
       const msg =
@@ -399,6 +483,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async getPickupCities(): Promise<City[]> {
     const response = await this.http.get<AymakanCitiesResponse>(
       "/pickup_request/cities",
+      this.errorOpts,
     );
 
     if (!response.success) {
@@ -443,6 +528,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<AymakanPickupResponse>(
       "/pickup_request/create",
       request,
+      this.errorOpts,
     );
 
     if (!response.success) {
@@ -459,6 +545,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<{ success: boolean }>(
       "/pickup_request/cancel",
       { pickup_request: Number(pickupId) },
+      this.errorOpts,
     );
     return response.success === true;
   }
@@ -469,7 +556,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.get<{
       success: boolean;
       data: { pickupRequests: { data: AymakanPickupResponse["data"][] } };
-    }>("/pickup_request/list");
+    }>("/pickup_request/list", this.errorOpts);
 
     if (!response.success) {
       throw new APIError("Failed to get pickup requests", {
@@ -478,7 +565,15 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    return response.data.pickupRequests.data.map(mapPickupResponse);
+    const list = response.data?.pickupRequests?.data;
+    if (!Array.isArray(list)) {
+      throw new APIError(
+        "Aymakan pickup list response is missing data.pickupRequests.data",
+        { carrier: "aymakan", raw: response },
+      );
+    }
+
+    return list.map(mapPickupResponse);
   }
 
   // =========================================================================
@@ -552,9 +647,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<AymakanAddressResponse>(
       "/address/create",
       request,
+      this.errorOpts,
     );
 
-    if (!response.success) {
+    if (!response.success || !response.data?.address) {
       throw new APIError("Failed to create address", {
         carrier: "aymakan",
         raw: response,
@@ -581,13 +677,20 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const response = await this.http.get<{
       success: boolean;
       data: { address: AymakanAddressResponse["data"]["address"][] };
-    }>("/address/list");
+    }>("/address/list", this.errorOpts);
 
     if (!response.success) {
       throw new APIError("Failed to get customer addresses", {
         carrier: "aymakan",
         raw: response,
       });
+    }
+
+    if (!Array.isArray(response.data?.address)) {
+      throw new APIError(
+        "Aymakan address list response is missing data.address",
+        { carrier: "aymakan", raw: response },
+      );
     }
 
     return response.data.address.map((addr) => ({
@@ -623,9 +726,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         phone: address.phone,
         description: address.description,
       },
+      this.errorOpts,
     );
 
-    if (!response.success) {
+    if (!response.success || !response.data?.address) {
       throw new APIError("Failed to update address", {
         carrier: "aymakan",
         raw: response,
@@ -652,7 +756,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     // The id must be sent in the JSON request body, not the URL path.
     const response = await this.http.delete<{ success: boolean }>(
       "/address/delete",
-      { body: { id } },
+      { body: { id }, errorExtractor: aymakanErrorExtractor },
     );
     return response.success;
   }

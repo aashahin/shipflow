@@ -39,6 +39,7 @@ import {
   mapCalculateRateRequest,
   mapCity,
   mapCreateShipmentRequest,
+  mapNonExistingWaybill,
   mapOffice,
   mapPickupRequest,
   mapPickupResponse,
@@ -378,10 +379,13 @@ export class AramexAdapter extends BaseCarrierAdapter {
   async track(trackingNumber: string): Promise<TrackingResult> {
     const results = await this.trackMultiple([trackingNumber]);
     const result = results[0];
-    if (!result) {
+    // trackMultiple now emits an "unknown"/not-found entry for waybills Aramex
+    // returns under NonExistingWaybills, so a missing-or-not-found waybill must
+    // raise a precise not-found rather than returning a misleading "unknown".
+    if (!result || (result.status === "unknown" && result.events.length === 0)) {
       throw new APIError("Shipment not found", {
         carrier: "aramex",
-        raw: { trackingNumber },
+        raw: result?.raw ?? { trackingNumber },
       });
     }
     return result;
@@ -400,9 +404,19 @@ export class AramexAdapter extends BaseCarrierAdapter {
     );
 
     const map = normalizeTrackingResults(response.TrackingResults);
-    return Object.entries(map).map(([waybill, results]) =>
+    const found = Object.entries(map).map(([waybill, results]) =>
       mapTrackingResult(waybill, results),
     );
+
+    // Aramex returns not-found waybills in a separate NonExistingWaybills bucket
+    // rather than as empty TrackingResults. Surface them as "unknown" entries so
+    // the returned array stays aligned to the input waybills (callers can map
+    // inputs→results); silently dropping them desynchronizes that mapping.
+    const nonExisting = (response.NonExistingWaybills ?? []).map(
+      mapNonExistingWaybill,
+    );
+
+    return [...found, ...nonExisting];
   }
 
   async trackByReference(reference: string): Promise<TrackingResult> {
@@ -463,13 +477,38 @@ export class AramexAdapter extends BaseCarrierAdapter {
     );
 
     // Judge success on the body payload, not the HTTP status: a "Fake 200 OK"
-    // can carry an empty ProcessedPickup. A usable pickup needs a GUID (or ID).
+    // can carry an empty ProcessedPickup. A usable pickup needs a GUID — that's
+    // the key CancelPickup requires (PickupGUID), so a pickup with only a
+    // numeric ID can't be cancelled and isn't a usable round-trip result.
     const processed = response.ProcessedPickup;
     if (!processed || (!processed.GUID && !processed.ID)) {
       throw new APIError("Failed to create pickup", {
         carrier: "aramex",
         raw: response,
       });
+    }
+
+    // A pickup can succeed at the header level (it has a GUID) while individual
+    // shipments inside it fail (ProcessedShipments[].HasErrors). Those per-
+    // shipment errors are otherwise swallowed — scan and surface them so a
+    // partially-failed pickup isn't reported as a clean success.
+    const failedShipments = (processed.ProcessedShipments ?? []).filter(
+      (s) => s.HasErrors,
+    );
+    if (failedShipments.length > 0) {
+      const notifications = failedShipments.flatMap((s) => s.Notifications ?? []);
+      throw new APIError(
+        notifications
+          .map((n) => n.Message)
+          .filter(Boolean)
+          .join("; ") ||
+          `Pickup created but ${failedShipments.length} shipment(s) failed`,
+        {
+          carrier: "aramex",
+          errors: AramexAdapter.notificationsToErrors(notifications),
+          raw: response,
+        },
+      );
     }
 
     return mapPickupResponse(processed, input);

@@ -553,6 +553,29 @@ describe("SMSAExpressAdapter", () => {
       expect(result.events).toHaveLength(0);
     });
 
+    test("handles tracking with omitted Scans key (no throw)", async () => {
+      // A freshly-booked AWB can come back with no `Scans` key at all.
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            AWB: "231200024000",
+            Reference: "",
+            Pieces: 1,
+            CODAmount: 0,
+            // intentionally no `Scans` field
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const result = await adapter.track("231200024000");
+
+      expect(result.status).toBe("unknown");
+      expect(result.statusLabel).toBe("Unknown");
+      expect(result.events).toHaveLength(0);
+      expect(result.deliveryDate).toBeUndefined();
+    });
+
     test("calls correct endpoint for single track", async () => {
       mockFetch.mockResolvedValueOnce(
         new Response(

@@ -278,6 +278,63 @@ describe("Aramex audit regression", () => {
       expect(pickup.carrier).toBe("aramex");
     });
 
+    test("createPickup id round-trips to cancelPickup as the GUID even when an ID is also present", async () => {
+      // ProcessedPickup carries BOTH a numeric ID and a GUID. CancelPickup keys
+      // on the GUID, so the surfaced id must be the GUID, not the ID.
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: false,
+          Notifications: [],
+          ProcessedPickup: { ID: "42", GUID: "guid-xyz-789" },
+        }),
+      );
+      const pickup = await adapter.createPickup(samplePickup());
+      expect(pickup.id).toBe("guid-xyz-789");
+
+      // Feed the surfaced id straight back into cancelPickup.
+      mockFetch.mockResolvedValueOnce(
+        json({ HasErrors: false, Notifications: [] }),
+      );
+      const ok = await adapter.cancelPickup(pickup.id);
+      expect(ok).toBe(true);
+      expect(JSON.parse(lastCall()[1].body as string).PickupGUID).toBe(
+        "guid-xyz-789",
+      );
+    });
+
+    test("createPickup surfaces per-shipment ProcessedShipments errors even with a GUID", async () => {
+      // Header-level success (a GUID is present) but a contained shipment failed
+      // — must not be reported as a clean success.
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: false,
+          Notifications: [],
+          ProcessedPickup: {
+            ID: "42",
+            GUID: "guid-xyz-789",
+            ProcessedShipments: [
+              { ID: "AWB-1", HasErrors: false, Notifications: [] },
+              {
+                ID: "",
+                HasErrors: true,
+                Notifications: [
+                  { Code: "ERR9", Message: "Invalid pickup shipment weight" },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+
+      const error = await adapter
+        .createPickup(samplePickup())
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(APIError);
+      expect((error as APIError).message).toContain(
+        "Invalid pickup shipment weight",
+      );
+    });
+
     test("createPickup throws on a fake-200 body with no usable pickup id", async () => {
       // HasErrors:false but an empty ProcessedPickup — success must be judged
       // from the body payload (GUID/ID), not the HTTP 200 status.
