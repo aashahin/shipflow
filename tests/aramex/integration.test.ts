@@ -1,10 +1,21 @@
 // file: tests/aramex/integration.test.ts
 /**
- * Aramex Integration Tests
- * These tests run against the REAL Aramex sandbox API.
- * Requires the following env vars (auto-skipped when ARAMEX_USERNAME is absent):
- *   ARAMEX_USERNAME, ARAMEX_PASSWORD, ARAMEX_ACCOUNT_NUMBER, ARAMEX_ACCOUNT_PIN,
- *   ARAMEX_ACCOUNT_ENTITY, ARAMEX_ACCOUNT_COUNTRY_CODE, ARAMEX_MODE (default sandbox)
+ * Aramex Integration Tests — REAL sandbox API.
+ *
+ * These hit Aramex's live JSON Shipping Services. They are GATED behind the
+ * `ARAMEX_LIVE` env flag so the normal (offline) suite stays deterministic:
+ *
+ *   ARAMEX_LIVE=1 bun test tests/aramex/integration.test.ts
+ *
+ * Credentials default to Aramex's public test account (overridable via env).
+ *
+ * ⚠️ ACCOUNT IS JORDAN (AccountCountryCode "JO", AccountEntity "AMM") — all
+ *    addresses, cities and currency must be Jordan-based, not Saudi. A domestic
+ *    JO→JO shipment maps to ProductGroup DOM / ProductType OND.
+ *
+ * ⚠️ HOST NOTE: the sandbox host `ws.dev.aramex.net` must be reachable from the
+ *    runner. Some CI/sandbox networks block it (TCP connect times out) even
+ *    though the production host resolves — run these where egress is allowed.
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
@@ -12,72 +23,85 @@ import { ShipFlow } from "../../src";
 import { AramexAdapter } from "../../src/carriers/aramex";
 import type { CreateShipmentInput } from "../../src/core/types";
 
-const USERNAME = process.env.ARAMEX_USERNAME;
+const RUN_LIVE = Boolean(process.env.ARAMEX_LIVE ?? Bun.env.ARAMEX_LIVE);
+
+// Public Aramex sandbox/test account (Jordan). Override via env if needed.
+const credentials = {
+  userName: process.env.ARAMEX_USERNAME ?? "testingapi@aramex.com",
+  password: process.env.ARAMEX_PASSWORD ?? "R123456789$r",
+  accountNumber: process.env.ARAMEX_ACCOUNT_NUMBER ?? "20016",
+  accountPin: process.env.ARAMEX_ACCOUNT_PIN ?? "331421",
+  accountEntity: process.env.ARAMEX_ACCOUNT_ENTITY ?? "AMM",
+  accountCountryCode: process.env.ARAMEX_ACCOUNT_COUNTRY_CODE ?? "JO",
+};
 const MODE = (process.env.ARAMEX_MODE ?? "sandbox") as "sandbox" | "production";
 
-const describeIf = USERNAME ? describe : describe.skip;
+console.log(
+  `Aramex live integration: ${RUN_LIVE ? "✅ enabled" : "⏭️  skipped (set ARAMEX_LIVE=1)"}`,
+);
 
-describeIf("Aramex Integration (Sandbox)", () => {
+const describeIf = RUN_LIVE ? describe : describe.skip;
+
+describeIf("Aramex Integration (Sandbox, JO account)", () => {
   let adapter: AramexAdapter;
   let createdTrackingNumber: string | null = null;
 
   beforeAll(() => {
-    adapter = new AramexAdapter({
-      mode: MODE,
-      credentials: {
-        userName: USERNAME!,
-        password: process.env.ARAMEX_PASSWORD ?? "",
-        accountNumber: process.env.ARAMEX_ACCOUNT_NUMBER ?? "",
-        accountPin: process.env.ARAMEX_ACCOUNT_PIN ?? "",
-        accountEntity: process.env.ARAMEX_ACCOUNT_ENTITY ?? "",
-        accountCountryCode: process.env.ARAMEX_ACCOUNT_COUNTRY_CODE ?? "SA",
-      },
-      companyName: "ShipFlow Integration Test",
-    });
+    adapter = new AramexAdapter({ mode: MODE, credentials, companyName: "ShipFlow Test" });
     // Confirm registration through the client surface too.
     const client = new ShipFlow({ adapters: [adapter] });
     expect(client.carrier("aramex")).toBe(adapter);
   });
 
+  // Jordan domestic shipment (Amman → Amman) → ProductGroup DOM / OND.
   const testInput = (): CreateShipmentInput => ({
     shipper: {
-      name: "Test Store",
-      company: "ShipFlow Test",
-      phone: "966501234567",
+      name: "ShipFlow Test Shipper",
+      company: "ShipFlow",
+      phone: "962790000000",
       email: "test@shipflow.dev",
-      line1: "King Fahd Road, Al Olaya",
-      neighbourhood: "Al Olaya",
-      city: "Riyadh",
-      postalCode: "12211",
-      countryCode: "SA",
+      line1: "Queen Rania Al Abdullah Street",
+      neighbourhood: "Jubeiha",
+      city: "Amman",
+      countryCode: "JO",
     },
     consignee: {
-      name: "Test Customer",
-      phone: "966509876543",
-      line1: "Prince Sultan Road",
-      neighbourhood: "Al Rawdah",
-      city: "Jeddah",
-      postalCode: "21577",
-      countryCode: "SA",
+      name: "ShipFlow Test Consignee",
+      phone: "962791111111",
+      line1: "Abdulhameed Sharaf Street",
+      neighbourhood: "Shmeisani",
+      city: "Amman",
+      countryCode: "JO",
     },
     parcels: [
-      {
-        weight: { value: 0.5, unit: "kg" },
-        pieces: 1,
-        description: "Test Package",
-      },
+      { weight: { value: 0.5, unit: "kg" }, pieces: 1, description: "Test Package" },
     ],
-    declaredValue: { amount: 100, currency: "SAR" },
+    reference: `SF-${MODE}-test`,
+    declaredValue: { amount: 20, currency: "JOD" },
   });
 
-  test("fetches cities", async () => {
+  test("fetches JO cities", async () => {
     const cities = await adapter.getCities();
     expect(cities).toBeArray();
     expect(cities.length).toBeGreaterThan(0);
     console.log(`✓ Fetched ${cities.length} cities`);
   });
 
-  test("creates a shipment", async () => {
+  test("fetches JO dropoff offices", async () => {
+    const offices = await adapter.getDropoffLocations();
+    expect(offices).toBeArray();
+    console.log(`✓ Fetched ${offices.length} offices`);
+  });
+
+  test("calculates a domestic rate", async () => {
+    const rates = await adapter.getRates(testInput());
+    expect(rates).toBeArray();
+    expect(rates[0]!.carrier).toBe("aramex");
+    expect(rates[0]!.amount).toBeGreaterThan(0);
+    console.log(`✓ Rate: ${rates[0]!.amount} ${rates[0]!.currency}`);
+  });
+
+  test("creates a domestic shipment", async () => {
     const shipment = await adapter.createShipment(testInput());
     expect(shipment.trackingNumber).toBeTruthy();
     expect(shipment.carrier).toBe("aramex");
@@ -99,12 +123,5 @@ describeIf("Aramex Integration (Sandbox)", () => {
     expect(result.trackingNumber).toBe(createdTrackingNumber);
     expect(result.carrier).toBe("aramex");
     console.log(`✓ Tracked: ${result.statusLabel}`);
-  });
-
-  test("calculates a rate", async () => {
-    const rates = await adapter.getRates(testInput());
-    expect(rates).toBeArray();
-    expect(rates[0]!.carrier).toBe("aramex");
-    console.log(`✓ Rate: ${rates[0]!.amount} ${rates[0]!.currency}`);
   });
 });

@@ -211,27 +211,57 @@ function mapDimensions(dims?: Dimensions): AramexDimensions | null {
 }
 
 function mapAddress(addr: Address): AramexPartyAddress {
+  // Aramex's WCF `Address` contract marks Line2, Line3 and PostCode as REQUIRED
+  // members — omitting them fails deserialization ("required data members
+  // 'Line2, Line3, PostCode' were not found"). Always send them (empty if unset).
   return {
     Line1: addr.line1,
-    Line2: addr.line2,
-    Line3: addr.neighbourhood,
+    Line2: addr.line2 ?? "",
+    Line3: addr.neighbourhood ?? "",
     City: addr.city,
     StateOrProvinceCode: addr.state,
-    PostCode: addr.postalCode,
+    PostCode: addr.postalCode ?? "",
     CountryCode: addr.countryCode,
+    // Coordinates are optional in the contract; omit when unset so Aramex
+    // doesn't treat a 0,0 default as a real location.
     Longitude: addr.coordinates?.longitude,
     Latitude: addr.coordinates?.latitude,
   };
 }
 
-function mapContact(addr: Address, fallbackCompany?: string): AramexContact {
+/**
+ * Build an Aramex `Contact`. Aramex's WCF Contact contract marks its string
+ * members as REQUIRED (the same pattern confirmed live for Address and
+ * Transaction — an empty value fails deserialization, an empty string is
+ * accepted), so every member is sent, defaulting to "".
+ */
+function buildContact(opts: {
+  personName: string;
+  companyName: string;
+  phone: string;
+  email?: string;
+}): AramexContact {
   return {
-    PersonName: addr.name,
-    CompanyName: addr.company ?? fallbackCompany ?? addr.name,
-    PhoneNumber1: addr.phone,
-    CellPhone: addr.phone,
-    EmailAddress: addr.email,
+    Department: "",
+    PersonName: opts.personName,
+    Title: "",
+    CompanyName: opts.companyName,
+    PhoneNumber1: opts.phone,
+    PhoneNumber1Ext: "",
+    PhoneNumber2: "",
+    CellPhone: opts.phone,
+    EmailAddress: opts.email ?? "",
+    Type: "",
   };
+}
+
+function mapContact(addr: Address, fallbackCompany?: string): AramexContact {
+  return buildContact({
+    personName: addr.name,
+    companyName: addr.company ?? fallbackCompany ?? addr.name,
+    phone: addr.phone,
+    email: addr.email,
+  });
 }
 
 function mapParty(
@@ -388,12 +418,11 @@ export function mapPickupRequest(
       City: input.city,
       CountryCode: ctx.countryCode,
     },
-    PickupContact: {
-      PersonName: input.contactName,
-      CompanyName: ctx.companyName ?? input.contactName,
-      PhoneNumber1: input.contactPhone,
-      CellPhone: input.contactPhone,
-    },
+    PickupContact: buildContact({
+      personName: input.contactName,
+      companyName: ctx.companyName ?? input.contactName,
+      phone: input.contactPhone,
+    }),
     PickupLocation: "Reception",
     PickupDate: toWcfDate(pickupDate),
     ReadyTime: toWcfDate(ready),

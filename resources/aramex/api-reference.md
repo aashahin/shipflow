@@ -51,6 +51,25 @@ adapter.
 
 ShipFlow config → ClientInfo mapping lives in `buildClientInfo` (`src/carriers/aramex/mappers.ts`).
 
+## Request serialization — WCF required members
+
+Aramex's services are WCF `DataContract` types deserialized with
+`DataContractJsonSerializer`, which **rejects requests that omit members marked
+`IsRequired`** with `HTTP 400` and `"required data members '…' were not found"`.
+Several members that look optional are required and must be present (an **empty
+string is accepted**, a missing key is not). Confirmed against the live API:
+
+| Contract | Required members ShipFlow always sends |
+|---|---|
+| `Transaction` | `Reference1`–`Reference5` (empty strings; never `{}`) |
+| `Address` (`PartyAddress`/Origin/Destination) | `Line1`, `Line2`, `Line3`, `City`, `PostCode`, `CountryCode` |
+| `Contact` | `PersonName`, `CompanyName`, `PhoneNumber1`, `PhoneNumber1Ext`, `PhoneNumber2`, `CellPhone`, `EmailAddress`, `Title`, `Type`, `Department` |
+
+Nullable members (`Dimensions`, `ChargeableWeight`, `CashOnDeliveryAmount`,
+`CustomsValueAmount`, `InsuranceAmount`) may be sent as `null`. Coordinates
+(`Longitude`/`Latitude`) are optional and omitted when unset (so `0,0` is never
+sent as a real location).
+
 ## Error model — "Fake 200 OK"
 
 Aramex returns **HTTP 200** even for logical failures. The body carries:

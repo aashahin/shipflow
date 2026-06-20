@@ -191,6 +191,72 @@ describe("Aramex audit regression", () => {
     });
   });
 
+  // These lock in the WCF "required data member" fixes found via live testing:
+  // an empty Transaction `{}`, or an Address/Contact missing members, fails
+  // Aramex's deserializer ("required data members '...' were not found").
+  describe("WCF required-member request shape", () => {
+    test("Transaction always carries Reference1–Reference5 (empty by default)", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+      await adapter.createShipment(sampleInput());
+      const body = JSON.parse(lastCall()[1].body as string);
+      expect(body.Transaction).toEqual({
+        Reference1: "",
+        Reference2: "",
+        Reference3: "",
+        Reference4: "",
+        Reference5: "",
+      });
+    });
+
+    test("PartyAddress always includes Line2/Line3/PostCode even when unset", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+      // sampleInput's shipper has no line2/neighbourhood/postalCode.
+      await adapter.createShipment(sampleInput());
+      const addr = JSON.parse(lastCall()[1].body as string).Shipments[0].Shipper
+        .PartyAddress;
+      expect(addr.Line2).toBe("");
+      expect(addr.Line3).toBe("");
+      expect(addr.PostCode).toBe("");
+    });
+
+    test("Contact always includes the required string members", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+      await adapter.createShipment(sampleInput());
+      const contact = JSON.parse(lastCall()[1].body as string).Shipments[0]
+        .Shipper.Contact;
+      for (const key of [
+        "Department",
+        "PersonName",
+        "Title",
+        "CompanyName",
+        "PhoneNumber1",
+        "PhoneNumber1Ext",
+        "PhoneNumber2",
+        "CellPhone",
+        "EmailAddress",
+        "Type",
+      ]) {
+        expect(contact[key]).toBeDefined();
+      }
+      expect(contact.EmailAddress).toBe(""); // sampleInput has no email
+    });
+
+    test("CalculateRate sends the populated Transaction and addresses", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: false,
+          Notifications: [],
+          TotalAmount: { Value: 10, CurrencyCode: "SAR" },
+        }),
+      );
+      await adapter.getRates(sampleInput());
+      const body = JSON.parse(lastCall()[1].body as string);
+      expect(body.Transaction.Reference1).toBe("");
+      expect(body.OriginAddress.PostCode).toBe("");
+      expect(body.DestinationAddress.Line2).toBe("");
+    });
+  });
+
   describe("pickups", () => {
     test("createPickup posts to CreatePickup and returns the GUID as id", async () => {
       mockFetch.mockResolvedValueOnce(

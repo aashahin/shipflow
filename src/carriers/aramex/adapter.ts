@@ -72,6 +72,20 @@ const DEFAULT_LABEL_INFO: AramexLabelInfo = {
   ReportType: "URL",
 };
 
+/**
+ * Aramex's WCF `Transaction` data contract marks Reference1–Reference5 as
+ * REQUIRED members, so an empty `{}` fails deserialization ("required data
+ * members 'Reference1..Reference5' were not found") on every operation. All five
+ * must be present; empty strings are accepted.
+ */
+const EMPTY_TRANSACTION = {
+  Reference1: "",
+  Reference2: "",
+  Reference3: "",
+  Reference4: "",
+  Reference5: "",
+} as const;
+
 export interface AramexConfig extends CarrierConfig {
   credentials: {
     userName: string;
@@ -217,7 +231,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/CreateShipments",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         LabelInfo: DEFAULT_LABEL_INFO,
         Shipments: [shipment],
       },
@@ -283,7 +297,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/CreateShipments",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         LabelInfo: DEFAULT_LABEL_INFO,
         Shipments: shipments,
       },
@@ -340,7 +354,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/PrintLabel",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         ShipmentNumber: trackingNumber,
         LabelInfo: DEFAULT_LABEL_INFO,
       },
@@ -378,7 +392,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/TrackShipments",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         Shipments: trackingNumbers,
         GetLastTrackingUpdateOnly: false,
       },
@@ -407,7 +421,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/CalculateRate",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         ...rateRequest,
       },
       { retry: true, errorExtractor: AramexAdapter.aramexErrorExtractor },
@@ -442,7 +456,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/CreatePickup",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         Pickup: pickup,
       },
       { errorExtractor: AramexAdapter.aramexErrorExtractor },
@@ -466,7 +480,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/CancelPickup",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         PickupGUID: String(pickupId),
       },
       { errorExtractor: AramexAdapter.aramexErrorExtractor },
@@ -486,7 +500,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/FetchCities",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         CountryCode:
           countryCode ?? this.aramexConfig.credentials.accountCountryCode,
       },
@@ -501,7 +515,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
       "/json/FetchOffices",
       {
         ClientInfo: this.buildClientInfo(),
-        Transaction: {},
+        Transaction: EMPTY_TRANSACTION,
         CountryCode:
           countryCode ?? this.aramexConfig.credentials.accountCountryCode,
       },
