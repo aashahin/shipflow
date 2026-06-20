@@ -162,11 +162,13 @@ export class HttpClient {
         json = await response.json();
       } else {
         const text = await response.text();
-        // Try parsing as JSON anyway (some APIs don't set proper content-type)
+        // Try parsing as JSON anyway (some APIs don't set proper content-type).
+        // If it isn't JSON, keep the raw string so endpoints documented to
+        // return a bare string (e.g. SMSA cancel/invoice) resolve correctly.
         try {
           json = JSON.parse(text);
         } catch {
-          json = { text };
+          json = text;
         }
       }
 
@@ -238,6 +240,8 @@ export class HttpClient {
   }
 
   private extractErrorMessage(json: unknown): string | undefined {
+    // Some carriers return a bare plain-text error body.
+    if (typeof json === "string") return json.trim() || undefined;
     if (!json || typeof json !== "object") return undefined;
     const obj = json as Record<string, unknown>;
 

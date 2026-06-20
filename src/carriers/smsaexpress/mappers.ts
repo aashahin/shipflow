@@ -74,6 +74,7 @@ function deriveStatusFromScans(
 
 function mapAddress(
   addr: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
+  opts?: { includeShortCode?: boolean },
 ): SMSAShipmentAddress {
   const result: SMSAShipmentAddress = {
     ContactName: addr.name,
@@ -90,7 +91,8 @@ function mapAddress(
     result.Coordinates = `${addr.coordinates.latitude},${addr.coordinates.longitude}`;
   }
 
-  if (addr.nationalAddress?.shortCode) {
+  // ShortCode is valid only on the consignee address per the SMSA spec.
+  if (opts?.includeShortCode && addr.nationalAddress?.shortCode) {
     result.ShortCode = addr.nationalAddress.shortCode;
   }
 
@@ -108,7 +110,9 @@ export function mapCreateB2CRequest(
     0,
   );
 
-  const consigneeAddress = mapAddress(input.consignee);
+  const consigneeAddress = mapAddress(input.consignee, {
+    includeShortCode: true,
+  });
   if (input.options?.metadata?.consigneeId) {
     consigneeAddress.ConsigneeID = input.options.metadata.consigneeId as string;
   }
@@ -151,7 +155,7 @@ export function mapCreateC2BRequest(
   );
 
   return {
-    PickupAddress: mapAddress(input.consignee),
+    PickupAddress: mapAddress(input.consignee, { includeShortCode: true }),
     ReturnToAddress: mapAddress(input.shipper),
     OrderNumber: input.reference ?? `ORD-${Date.now()}`,
     DeclaredValue: input.declaredValue?.amount ?? 0.1,
@@ -284,7 +288,9 @@ export function mapCreate2WayRequest(
     0,
   );
 
-  const consigneeAddress = mapAddress(input.consignee);
+  const consigneeAddress = mapAddress(input.consignee, {
+    includeShortCode: true,
+  });
   if (input.options?.metadata?.consigneeId) {
     consigneeAddress.ConsigneeID = input.options.metadata.consigneeId as string;
   }

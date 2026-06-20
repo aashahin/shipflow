@@ -90,7 +90,9 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   protected async executeCreateShipment(
     input: CreateShipmentInput,
   ): Promise<Shipment> {
-    const isC2B = C2B_SERVICE_CODES.has(input.serviceType);
+    const isC2B =
+      input.serviceType !== undefined &&
+      C2B_SERVICE_CODES.has(input.serviceType);
 
     if (isC2B) {
       return this.createC2BShipment(input);
@@ -128,7 +130,9 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     const response = await this.http.post<string>(
       `/api/c2b/cancel/${encodeURIComponent(trackingNumber)}`,
     );
-    // API returns a string message on success
+    // API returns a plain-text message on success (e.g. "Shipment Cancelled
+    // Successfully!"); inspect it for confirmation. A non-string (JSON) success
+    // response is treated as success.
     return typeof response === "string"
       ? response.toLowerCase().includes("cancelled")
       : true;
@@ -170,7 +174,7 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
 
   async getLabel(
     trackingNumber: string,
-    _format?: "PDF" | "PNG",
+    _format?: "PDF" | "ZPL" | "PNG",
   ): Promise<string> {
     // SMSA returns the waybill file (base64 PDF) as part of the shipment query.
     // Try B2C first (most common), then C2B as fallback.
