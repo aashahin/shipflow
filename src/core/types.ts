@@ -111,7 +111,7 @@ export interface CreateShipmentInput {
   shipper: Address;
   consignee: Address;
   parcels: Parcel[];
-  serviceType: string;
+  serviceType?: string;
   reference?: string;
   cod?: CODDetails;
   declaredValue?: DeclaredValue;

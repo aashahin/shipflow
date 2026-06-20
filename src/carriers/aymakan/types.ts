@@ -259,12 +259,10 @@ export interface AymakanAddressResponse {
 }
 
 export interface AymakanCancelResponse {
-  success: boolean;
-  shipping?: {
-    reference: string | null;
-    tracking_number: string;
-    status: string;
-  };
+  success?: boolean;
+  error?: boolean;
+  message?: string;
+  response?: string;
 }
 
 export interface AymakanWebhookPayload {

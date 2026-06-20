@@ -4,7 +4,11 @@
  * Full implementation of the CarrierAdapter interface for Aymakan API.
  */
 
-import { APIError, UnsupportedOperationError } from "../../core/errors";
+import {
+  APIError,
+  UnsupportedOperationError,
+  ValidationError,
+} from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import {
   validateCreateShipmentInput,
@@ -226,6 +230,14 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async createBulkShipments(
     inputs: CreateShipmentInput[],
   ): Promise<Shipment[]> {
+    // Aymakan rejects batches larger than 30 ("Only 30 shipments can be
+    // created at a time."), so fail fast with a clear error before the request.
+    if (inputs.length > 30) {
+      throw new ValidationError(
+        "Aymakan bulk create accepts at most 30 shipments per request",
+        { raw: { count: inputs.length } },
+      );
+    }
     inputs.forEach(validateCreateShipmentInput);
     await this.ensureCitiesLoaded();
     const requests = inputs
@@ -233,8 +245,11 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       .map(mapCreateShipmentRequest);
     const response = await this.http.post<{
       success: boolean;
-      data: { shipments: AymakanCreateShipmentResponse["shipping"][] };
-    }>("/shipping/create_bulk", { data: requests });
+      message?: string;
+      bulk_awb?: string;
+      total_shipments?: number;
+      shipments: AymakanCreateShipmentResponse["shipping"][];
+    }>("/shipping/create/bulk_shipping", { shipments: requests });
 
     if (!response.success) {
       throw new APIError("Failed to create bulk shipments", {
@@ -243,7 +258,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    return response.data.shipments.map(mapShipmentResponse);
+    return response.shipments.map(mapShipmentResponse);
   }
 
   async cancelShipment(trackingNumber: string): Promise<boolean> {
@@ -254,14 +269,15 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         tracking: trackingNumber,
       },
     );
-    return response.success;
+    return response.success === true;
   }
 
   async cancelByReference(reference: string): Promise<boolean> {
     const response = await this.http.post<AymakanCancelResponse>(
-      `/shipping/cancel/reference/${encodeURIComponent(reference)}`,
+      "/shipping/cancel_by_reference",
+      { reference },
     );
-    return response.success;
+    return response.success === true;
   }
 
   async updateDeliveryAddress(
@@ -317,7 +333,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async trackByReference(reference: string): Promise<TrackingResult> {
     const response = await this.http.get<AymakanTrackResponse>(
-      `/shipments/by_reference/${encodeURIComponent(reference)}`,
+      `/shipping/by_reference/${encodeURIComponent(reference)}`,
     );
 
     if (!response.success || !response.data.shipments[0]) {
@@ -336,47 +352,44 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async getLabel(
     trackingNumber: string,
-    format?: "PDF" | "PNG",
+    _format?: "PDF" | "ZPL" | "PNG",
   ): Promise<string> {
+    // Note: this endpoint always returns a single PDF download URL, so the
+    // requested `format` cannot be honored.
     const response = await this.http.get<{
       success: boolean;
-      data: { label: string; pdf_label: string; awb_url: string };
+      error?: boolean;
+      message?: string;
+      response?: string;
+      data: { awb_url: string };
     }>(`/shipping/awb/tracking/${encodeURIComponent(trackingNumber)}`);
 
-    if (!response.success) {
-      throw new APIError("Failed to get label", {
-        carrier: "aymakan",
-        raw: response,
-      });
+    if (!response.success || !response.data?.awb_url) {
+      const msg = response.message ?? response.response ?? "Failed to get label";
+      throw new APIError(msg, { carrier: "aymakan", raw: response });
     }
 
-    // Prefer the format the caller requested
-    if (format === "PNG") {
-      return (
-        response.data.label || response.data.awb_url || response.data.pdf_label
-      );
-    }
-    return (
-      response.data.pdf_label || response.data.awb_url || response.data.label
-    );
+    return response.data.awb_url;
   }
 
   async getBulkLabels(trackingNumbers: string[]): Promise<string> {
-    const response = await this.http.post<{
+    // Documented as a GET with comma-separated tracking numbers in the path.
+    const ids = trackingNumbers.map(encodeURIComponent).join(",");
+    const response = await this.http.get<{
       success: boolean;
-      data: { label_url: string };
-    }>("/shipping/bulk_awb_labels", {
-      tracking_numbers: trackingNumbers,
-    });
+      error?: boolean;
+      message?: string;
+      response?: string;
+      data: { bulk_awb_url: string };
+    }>(`/shipping/bulk_awb/trackings/${ids}`);
 
-    if (!response.success) {
-      throw new APIError("Failed to get bulk labels", {
-        carrier: "aymakan",
-        raw: response,
-      });
+    if (!response.success || !response.data?.bulk_awb_url) {
+      const msg =
+        response.message ?? response.response ?? "Failed to get bulk labels";
+      throw new APIError(msg, { carrier: "aymakan", raw: response });
     }
 
-    return response.data.label_url;
+    return response.data.bulk_awb_url;
   }
 
   // =========================================================================
@@ -444,16 +457,19 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   async cancelPickup(pickupId: string | number): Promise<boolean> {
     const response = await this.http.post<{ success: boolean }>(
-      `/pickup_request/cancel/${encodeURIComponent(String(pickupId))}`,
+      "/pickup_request/cancel",
+      { pickup_request: Number(pickupId) },
     );
-    return response.success;
+    return response.success === true;
   }
 
   async getPickupRequests(): Promise<Pickup[]> {
+    // The list endpoint returns a Laravel paginated structure:
+    // { success, data: { pickupRequests: { data: [...] } } }
     const response = await this.http.get<{
       success: boolean;
-      data: { pickup_requests: AymakanPickupResponse["data"][] };
-    }>("/pickup_requests");
+      data: { pickupRequests: { data: AymakanPickupResponse["data"][] } };
+    }>("/pickup_request/list");
 
     if (!response.success) {
       throw new APIError("Failed to get pickup requests", {
@@ -462,7 +478,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    return response.data.pickup_requests.map(mapPickupResponse);
+    return response.data.pickupRequests.data.map(mapPickupResponse);
   }
 
   // =========================================================================
@@ -486,22 +502,26 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     {
       id: string;
       name: string;
-      nameAr?: string;
       address?: string;
       city?: string;
+      latitude?: number;
+      longitude?: number;
     }[]
   > {
+    // The API returns `data` as a flat array of warehouse objects. There is no
+    // `id` field — the warehouse code lives in `name` (e.g. "RUH-WH").
     const response = await this.http.get<{
       success: boolean;
-      data: {
-        locations: Array<{
-          id: number;
-          name: string;
-          name_ar?: string;
-          address?: string;
-          city?: string;
-        }>;
-      };
+      data: Array<{
+        name: string;
+        city?: string;
+        address?: string;
+        manager?: string;
+        mobile_phone?: string;
+        email?: string;
+        location_lat?: number | null;
+        location_lng?: number | null;
+      }>;
     }>("/dropoff_locations");
 
     if (!response.success) {
@@ -511,12 +531,13 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    return response.data.locations.map((loc) => ({
-      id: String(loc.id),
+    return response.data.map((loc) => ({
+      id: loc.name,
       name: loc.name,
-      nameAr: loc.name_ar,
       address: loc.address,
       city: loc.city,
+      latitude: loc.location_lat ?? undefined,
+      longitude: loc.location_lng ?? undefined,
     }));
   }
 
@@ -559,8 +580,8 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   async getCustomerAddresses(): Promise<CustomerAddress[]> {
     const response = await this.http.get<{
       success: boolean;
-      data: { addresses: AymakanAddressResponse["data"]["address"][] };
-    }>("/addresses");
+      data: { address: AymakanAddressResponse["data"]["address"][] };
+    }>("/address/list");
 
     if (!response.success) {
       throw new APIError("Failed to get customer addresses", {
@@ -569,7 +590,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       });
     }
 
-    return response.data.addresses.map((addr) => ({
+    return response.data.address.map((addr) => ({
       id: addr.id,
       title: addr.title,
       name: addr.name,
@@ -589,8 +610,9 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     address: Partial<CustomerAddress>,
   ): Promise<CustomerAddress> {
     const response = await this.http.put<AymakanAddressResponse>(
-      `/address/update/${id}`,
+      "/address/update",
       {
+        id,
         title: address.title,
         name: address.name,
         email: address.email,
@@ -627,8 +649,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   }
 
   async deleteCustomerAddress(id: number): Promise<boolean> {
+    // The id must be sent in the JSON request body, not the URL path.
     const response = await this.http.delete<{ success: boolean }>(
-      `/address/delete/${id}`,
+      "/address/delete",
+      { body: { id } },
     );
     return response.success;
   }

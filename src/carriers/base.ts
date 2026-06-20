@@ -70,7 +70,10 @@ export interface CarrierAdapter {
   // =========================================================================
 
   /** Get label URL for a shipment */
-  getLabel(trackingNumber: string, format?: "PDF" | "PNG"): Promise<string>;
+  getLabel(
+    trackingNumber: string,
+    format?: "PDF" | "ZPL" | "PNG",
+  ): Promise<string>;
 
   /** Get bulk labels as single PDF (if supported) */
   getBulkLabels?(trackingNumbers: string[]): Promise<string>;
@@ -183,7 +186,7 @@ export abstract class BaseCarrierAdapter implements CarrierAdapter {
   abstract trackMultiple(trackingNumbers: string[]): Promise<TrackingResult[]>;
   abstract getLabel(
     trackingNumber: string,
-    format?: "PDF" | "PNG",
+    format?: "PDF" | "ZPL" | "PNG",
   ): Promise<string>;
 
   /** Get base URL based on mode (sandbox/production) */

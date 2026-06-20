@@ -219,9 +219,22 @@ export function mapShipmentResponse(data: AymakanShipmentResponse): Shipment {
   };
 }
 
+/**
+ * Parse an Aymakan timestamp. Top-level fields are ISO 8601 (with `T`/`Z`), but
+ * `tracking_info[].created_at` values are space-separated "YYYY-MM-DD HH:MM:SS"
+ * strings in Saudi local time (UTC+3) with no timezone marker. `new Date()`
+ * would parse those in the host's local timezone, so normalize to +03:00.
+ */
+function parseAymakanDate(value: string): Date {
+  if (/[TZ]|[+-]\d{2}:?\d{2}$/.test(value)) {
+    return new Date(value);
+  }
+  return new Date(`${value.replace(" ", "T")}+03:00`);
+}
+
 export function mapTrackingEvent(event: AymakanTrackingEvent): TrackingEvent {
   return {
-    timestamp: new Date(event.created_at),
+    timestamp: parseAymakanDate(event.created_at),
     statusCode: event.status_code,
     status: mapAymakanStatus(event.status_code) ?? "unknown",
     description: event.description,
@@ -232,13 +245,32 @@ export function mapTrackingEvent(event: AymakanTrackingEvent): TrackingEvent {
 export function mapTrackingResult(
   data: AymakanTrackShipmentData,
 ): TrackingResult {
+  const events = data.tracking_info.map(mapTrackingEvent);
+
+  // The top-level `status` field is a human-readable label on the /track
+  // endpoint (e.g. "Received at Warehouse") and an AY code on /by_reference.
+  // Derive the unified status from the most recent tracking event (whose
+  // status_code is always an AY code), falling back to mapping the top-level
+  // status, then "unknown".
+  const latestEvent = events.length
+    ? [...events].sort(
+        (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+      )[0]
+    : undefined;
+  let status: ShipmentStatus;
+  if (latestEvent && latestEvent.status !== "unknown") {
+    status = latestEvent.status;
+  } else {
+    status = mapAymakanStatus(data.status) ?? latestEvent?.status ?? "unknown";
+  }
+
   return {
     trackingNumber: data.tracking_number,
     carrier: "aymakan",
     reference: data.reference ?? undefined,
-    status: mapAymakanStatus(data.status) ?? "unknown",
+    status,
     statusLabel: data.status_label,
-    events: data.tracking_info.map(mapTrackingEvent),
+    events,
     deliveryDate: data.delivery_date ? new Date(data.delivery_date) : undefined,
     pickupDate: data.pickup_date ? new Date(data.pickup_date) : undefined,
     receivedAt: data.received_at ? new Date(data.received_at) : undefined,
@@ -371,7 +403,10 @@ export function parseAymakanWebhook(
     eventType,
     trackingNumber: data.tracking_number,
     reference: data.reference ?? undefined,
-    status: eventType === "weight_update" ? "unknown" : (mapAymakanStatus(data.status) ?? "unknown"),
+    // `status` is a core field present on every webhook regardless of event
+    // type, so map it even for weight_update events. Consumers can still branch
+    // on `eventType` to detect weight updates.
+    status: mapAymakanStatus(data.status) ?? "unknown",
     statusCode: data.status,
     statusLabel: data.status_label,
     reasonCode: data.reason_code ?? undefined,

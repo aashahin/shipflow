@@ -103,7 +103,7 @@ export const CreateShipmentInputSchema = z.object({
   shipper: AddressSchema,
   consignee: AddressSchema,
   parcels: z.array(ParcelSchema).min(1, "At least one parcel is required"),
-  serviceType: z.string().min(1, "Service type is required"),
+  serviceType: z.string().min(1).optional(),
   reference: z.string().optional(),
   cod: CODDetailsSchema.optional(),
   declaredValue: DeclaredValueSchema.optional(),
