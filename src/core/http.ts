@@ -1,10 +1,11 @@
 // file: src/core/http.ts
 /**
- * Bun-native HTTP client for ShipFlow
- * - Uses native fetch (optimized in Bun)
+ * HTTP client for ShipFlow
+ * - Uses the runtime's global `fetch` (Node 18+, Deno, Bun, edge/workers)
  * - Handles "Fake 200 OK" responses (Aramex pattern)
  * - Automatic JSON parsing with error extraction
- * - Retry with exponential backoff via p-retry (GET only by default)
+ * - Native retry with jittered exponential backoff (GET only by default)
+ * - Honors Retry-After on 429/503 within an inline cap (see ./retry)
  *
  * SAFETY: Mutating requests (POST/PUT/DELETE/PATCH) are NOT retried by default
  * because retrying e.g. createShipment after a 500 could create duplicate
@@ -12,19 +13,31 @@
  * explicitly opt-in for safe POST endpoints (e.g. bulk tracking).
  */
 
-import pRetry from "p-retry";
 import {
   APIError,
   AuthenticationError,
   NetworkError,
+  RateLimitError,
   ShipFlowError,
 } from "./errors";
+import { parseRetryAfter, withRetry } from "./retry";
 
 export interface RetryConfig {
   /** Max number of retries (default: 2) */
   retries?: number;
   /** HTTP status codes to retry on (default: [429, 500, 502, 503, 504]) */
   retryableStatuses?: number[];
+  /** Base delay (ms) for exponential backoff (default: 500) */
+  baseMs?: number;
+  /** Ceiling (ms) for the exponential-backoff window (default: 20_000) */
+  maxMs?: number;
+  /**
+   * Largest Retry-After delay (ms) we sleep on inline (default: 15_000).
+   * A 429/503 asking us to wait longer than this is surfaced as a
+   * `RateLimitError` (carrying `retryAfterMs`) instead of being retried inline,
+   * so a durable queue/workflow can reschedule it.
+   */
+  inlineCapMs?: number;
 }
 
 export interface HttpClientConfig {
@@ -47,25 +60,42 @@ export interface RequestOptions {
    * - omitted → auto (GET retries, mutating methods do not)
    */
   retry?: boolean;
+  /**
+   * Caller cancellation. Aborts both the in-flight request and any
+   * inter-attempt retry sleep, so one signal tears down the whole operation.
+   */
+  signal?: AbortSignal;
   /** Custom error extractor for carriers with non-standard error formats */
   errorExtractor?: (json: unknown) => {
     hasError: boolean;
     message?: string;
     errors?: Record<string, string[]>;
+    /** Carrier signalled throttling inside an otherwise-OK response. */
+    rateLimited?: boolean;
+    /** Suggested wait (ms) if the carrier provided one in-band. */
+    retryAfterMs?: number;
   };
 }
 
 export class HttpClient {
   private config: HttpClientConfig;
-  private retryConfig: { retries: number; retryableStatuses: number[] };
+  private retryConfig: {
+    retries: number;
+    retryableStatuses: number[];
+    baseMs: number;
+    maxMs: number;
+    inlineCapMs: number;
+  };
 
   private static readonly DEFAULT_RETRYABLE = [429, 500, 502, 503, 504];
   private static readonly SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
   constructor(config: HttpClientConfig) {
     this.config = {
-      timeout: 30_000,
       ...config,
+      // Guarantee a numeric timeout even if `timeout: undefined` is passed
+      // explicitly — AbortSignal.timeout() requires a real number.
+      timeout: config.timeout ?? 30_000,
     };
     const retry =
       config.retry === false ? { retries: 0 } : (config.retry ?? {});
@@ -73,6 +103,9 @@ export class HttpClient {
       retries: retry.retries ?? 2,
       retryableStatuses:
         retry.retryableStatuses ?? HttpClient.DEFAULT_RETRYABLE,
+      baseMs: retry.baseMs ?? 500,
+      maxMs: retry.maxMs ?? 20_000,
+      inlineCapMs: retry.inlineCapMs ?? 15_000,
     };
   }
 
@@ -84,10 +117,15 @@ export class HttpClient {
       return this.executeRequest<T>(endpoint, options);
     }
 
-    return pRetry(() => this.executeRequest<T>(endpoint, options), {
+    return withRetry(() => this.executeRequest<T>(endpoint, options), {
       retries: this.retryConfig.retries,
-      minTimeout: 500,
-      shouldRetry: ({ error }) => this.isRetryable(error),
+      baseMs: this.retryConfig.baseMs,
+      maxMs: this.retryConfig.maxMs,
+      inlineCapMs: this.retryConfig.inlineCapMs,
+      shouldRetry: (error) => this.isRetryable(error),
+      retryAfterMs: (error) =>
+        error instanceof RateLimitError ? error.retryAfterMs : undefined,
+      signal: options.signal,
     });
   }
 
@@ -104,6 +142,10 @@ export class HttpClient {
 
   private isRetryable(error: unknown): boolean {
     if (error instanceof NetworkError) return true;
+    // A rate-limit is always retryable in principle (the retry helper decides
+    // whether the Retry-After window is short enough to honor inline). This also
+    // covers carrier "fake 200" throttles, whose statusCode (200) isn't listed.
+    if (error instanceof RateLimitError) return true;
     if (error instanceof APIError && error.statusCode != null) {
       return this.retryConfig.retryableStatuses.includes(error.statusCode);
     }
@@ -120,6 +162,7 @@ export class HttpClient {
       body,
       params,
       errorExtractor,
+      signal: callerSignal,
     } = options;
 
     // Build URL with query params
@@ -137,8 +180,13 @@ export class HttpClient {
       }
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+    // Native, leak-free per-request timeout. `AbortSignal.timeout` schedules an
+    // unref'd timer that's GC'd with the signal — no manual setTimeout/clearTimeout
+    // to leak. Combine with the caller's signal so either source cancels the fetch.
+    const timeoutSignal = AbortSignal.timeout(this.config.timeout!);
+    const signal = callerSignal
+      ? AbortSignal.any([callerSignal, timeoutSignal])
+      : timeoutSignal;
 
     try {
       const response = await fetch(url, {
@@ -150,10 +198,8 @@ export class HttpClient {
           ...headers,
         },
         body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
+        signal,
       });
-
-      clearTimeout(timeoutId);
 
       // Parse JSON response
       let json: unknown;
@@ -174,13 +220,31 @@ export class HttpClient {
 
       // Handle HTTP errors
       if (!response.ok) {
-        this.handleHttpError(response.status, json);
+        // Capture the carrier's rate-limit window on the canonical statuses so
+        // the retry helper can honor (or reschedule against) it.
+        const retryAfterMs =
+          response.status === 429 || response.status === 503
+            ? parseRetryAfter(response.headers.get("retry-after"))
+            : undefined;
+        this.handleHttpError(response.status, json, retryAfterMs);
       }
 
       // Check for "Fake 200 OK" pattern (Aramex, some Aymakan endpoints)
       if (errorExtractor) {
         const extracted = errorExtractor(json);
         if (extracted.hasError) {
+          if (extracted.rateLimited) {
+            throw new RateLimitError(
+              extracted.message ?? "Carrier rate limit",
+              {
+                carrier: this.config.carrier,
+                statusCode: 200,
+                errors: extracted.errors,
+                retryAfterMs: extracted.retryAfterMs,
+                raw: json,
+              },
+            );
+          }
           throw new APIError(extracted.message ?? "API returned an error", {
             carrier: this.config.carrier,
             statusCode: 200,
@@ -192,13 +256,22 @@ export class HttpClient {
 
       return json as T;
     } catch (error) {
-      clearTimeout(timeoutId);
-
       if (error instanceof ShipFlowError) {
         throw error;
       }
 
-      if (error instanceof DOMException && error.name === "AbortError") {
+      // Caller explicitly cancelled → surface the abort as-is (not a retryable
+      // network failure). Distinguishes from the internal timeout below.
+      if (callerSignal?.aborted) {
+        throw error;
+      }
+
+      // `AbortSignal.timeout` aborts with a "TimeoutError"; legacy/mocked aborts
+      // use "AbortError". Either means the per-request deadline elapsed.
+      if (
+        error instanceof DOMException &&
+        (error.name === "TimeoutError" || error.name === "AbortError")
+      ) {
         throw new NetworkError(
           `Request timeout after ${this.config.timeout}ms`,
           {
@@ -221,12 +294,26 @@ export class HttpClient {
     }
   }
 
-  private handleHttpError(status: number, json: unknown): never {
+  private handleHttpError(
+    status: number,
+    json: unknown,
+    retryAfterMs?: number,
+  ): never {
     const message = this.extractErrorMessage(json) ?? `HTTP ${status}`;
 
     if (status === 401) {
       throw new AuthenticationError(message, {
         carrier: this.config.carrier,
+        raw: json,
+      });
+    }
+
+    if (status === 429 || status === 503) {
+      throw new RateLimitError(message, {
+        carrier: this.config.carrier,
+        statusCode: status,
+        errors: this.extractValidationErrors(json),
+        retryAfterMs,
         raw: json,
       });
     }

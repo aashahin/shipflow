@@ -51,7 +51,34 @@ export class APIError extends ShipFlowError {
   }
 }
 
-/** Validation failed before sending request (Zod parse failure) */
+/**
+ * Carrier rate-limited the request (HTTP 429, 503, or a carrier-specific throttle
+ * such as Aramex's "fake 200" envelope). Extends APIError so existing
+ * `instanceof APIError` handling keeps working, while `retryAfterMs` lets callers
+ * (and the retry helper) honor or reschedule against the carrier's wait window.
+ */
+export class RateLimitError extends APIError {
+  /** Suggested wait before retrying, in ms (parsed from Retry-After when present). */
+  readonly retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    options?: {
+      carrier?: string;
+      code?: string;
+      statusCode?: number;
+      errors?: Record<string, string[]>;
+      retryAfterMs?: number;
+      raw?: unknown;
+    }
+  ) {
+    super(message, options);
+    this.name = 'RateLimitError';
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+}
+
+/** Validation failed before sending request (Valibot parse failure) */
 export class ValidationError extends ShipFlowError {
   readonly field?: string;
   readonly issues?: Array<{ path: string; message: string }>;

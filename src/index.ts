@@ -58,6 +58,7 @@ export {
   APIError,
   AuthenticationError,
   NetworkError,
+  RateLimitError,
   ShipFlowError,
   UnsupportedOperationError,
   ValidationError,

@@ -8,9 +8,10 @@ Think EasyPost / Shippo, but purpose-built for Saudi Arabia and the GCC.
 
 - **Unified types** — one `CreateShipmentInput`, one `TrackingResult`, one `WebhookEvent`, regardless of carrier
 - **Tree-shakeable** — only the carriers you import are bundled
-- **Auto-validation** — Zod schemas validate every `createShipment()` call before it hits the network
+- **Auto-validation** — Valibot schemas validate every `createShipment()` call before it hits the network
 - **Webhook parsing** — normalize incoming carrier webhooks into a single event format
-- **Zero runtime dependencies** — Bun-native `fetch`, no axios/node-fetch
+- **Smart retries** — dependency-free retry with jittered backoff that honors carrier `Retry-After` on 429/503, surfacing a `RateLimitError` when the wait is too long to absorb inline
+- **Minimal dependencies** — only [Valibot](https://github.com/fabian-hiller/valibot) for validation; uses the runtime's global `fetch` (Node 20+, Deno, Bun, edge/workers), no axios/node-fetch
 - **TypeScript-first** — strict types, no `any`
 
 ## Installation
@@ -165,7 +166,8 @@ things make it different from the other carriers:
   set `locationBaseUrl` on the config.
 - **"Fake 200 OK" errors** — Aramex returns HTTP 200 even on logical failures, with
   `HasErrors: true` + `Notifications[]`. ShipFlow surfaces these as `APIError`, including
-  per-shipment errors inside an otherwise-clean `CreateShipments` batch.
+  per-shipment errors inside an otherwise-clean `CreateShipments` batch. Throttling
+  notifications in that envelope are surfaced as `RateLimitError` so retries back off.
 - **Rates are supported** (`getRates` → `CalculateRate`), unlike Aymakan/SMSA.
 - **`cancelShipment` is unsupported** (the classic API has no shipment-cancel operation) and
   throws `UnsupportedOperationError`. Pickups can be cancelled via `cancelPickup`.
@@ -308,7 +310,7 @@ interface WebhookEvent {
 
 ## Input Validation
 
-All `createShipment()` calls are **automatically validated** using Zod schemas before hitting the carrier API. Invalid input throws a `ValidationError` with field-level details:
+All `createShipment()` calls are **automatically validated** using Valibot schemas before hitting the carrier API. Invalid input throws a `ValidationError` with field-level details:
 
 ```typescript
 try {
@@ -340,7 +342,7 @@ validateCreateShipmentInput(input); // throws ValidationError or returns validat
 validatePickupRequest(pickupInput); // same pattern
 ```
 
-Exported Zod schemas for advanced use (custom refinements, partial validation, etc.):
+Exported Valibot schemas for advanced use (custom refinements, partial validation, etc.):
 
 ```typescript
 import {
@@ -359,6 +361,7 @@ All errors extend `ShipFlowError` for easy catch-all handling:
 import {
   ShipFlowError,
   NetworkError,
+  RateLimitError,
   APIError,
   ValidationError,
   AuthenticationError,
@@ -373,6 +376,8 @@ try {
     // Bad input — check error.issues
   } else if (error instanceof AuthenticationError) {
     // Invalid API key
+  } else if (error instanceof RateLimitError) {
+    // Rate limited — check error.retryAfterMs (ms to wait), reschedule if set
   } else if (error instanceof APIError) {
     // Carrier returned an error — check error.statusCode, error.errors
   } else if (error instanceof NetworkError) {
@@ -380,6 +385,37 @@ try {
   }
 }
 ```
+
+> `RateLimitError extends APIError`, so check it **before** `APIError` in your
+> `if`/`else` chain (a plain `catch (e) { if (e instanceof APIError) }` still
+> catches it).
+
+### Retries & rate limiting
+
+Safe, idempotent requests (GETs, plus tracking endpoints opted in by the
+adapters) are retried automatically with **jittered exponential backoff**.
+Mutating requests (create/cancel) are **not** retried by default, so a timed-out
+`createShipment` never risks a duplicate on the carrier.
+
+When a carrier replies `429`/`503` with a `Retry-After` header, ShipFlow:
+
+- **honors it inline** if the wait is within the inline cap (15s by default),
+  sleeping out the window (plus a little jitter) before retrying; otherwise
+- **stops and throws `RateLimitError`** carrying `retryAfterMs`, so a durable
+  queue/worker can reschedule instead of blocking the request for minutes.
+
+```typescript
+try {
+  await client.carrier("aymakan").track(trackingNumber);
+} catch (error) {
+  if (error instanceof RateLimitError && error.retryAfterMs != null) {
+    await scheduleRetryIn(error.retryAfterMs); // your queue/worker
+  }
+}
+```
+
+Aramex reports throttling inside its "fake 200" envelope rather than via HTTP
+429; ShipFlow detects that and raises the same `RateLimitError`.
 
 ## Custom Adapters
 
