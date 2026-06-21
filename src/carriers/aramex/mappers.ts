@@ -222,23 +222,49 @@ function mapDimensions(dims?: Dimensions): AramexDimensions | null {
   };
 }
 
-function mapAddress(addr: Address): AramexPartyAddress {
-  // Aramex's WCF `Address` contract marks Line2, Line3 and PostCode as REQUIRED
-  // members — omitting them fails deserialization ("required data members
-  // 'Line2, Line3, PostCode' were not found"). Always send them (empty if unset).
+/**
+ * Build an Aramex `PartyAddress` with every WCF-required member present. The
+ * contract marks `Line2`, `Line3` and `PostCode` as REQUIRED — omitting any
+ * fails deserialization ("required data members 'Line2, Line3, PostCode' were
+ * not found") — so they default to "" rather than being dropped. Coordinates
+ * stay optional and are omitted when unset, so a 0,0 default is never sent as a
+ * real location. This is the single source of truth for the address shape;
+ * every Aramex address (shipper, consignee, pickup) goes through it.
+ */
+function buildPartyAddress(fields: {
+  line1: string;
+  line2?: string;
+  line3?: string;
+  city: string;
+  state?: string;
+  postCode?: string;
+  countryCode: string;
+  coordinates?: { latitude: number; longitude: number };
+}): AramexPartyAddress {
   return {
-    Line1: addr.line1,
-    Line2: addr.line2 ?? "",
-    Line3: addr.neighbourhood ?? "",
-    City: addr.city,
-    StateOrProvinceCode: addr.state,
-    PostCode: addr.postalCode ?? "",
-    CountryCode: addr.countryCode,
-    // Coordinates are optional in the contract; omit when unset so Aramex
-    // doesn't treat a 0,0 default as a real location.
-    Longitude: addr.coordinates?.longitude,
-    Latitude: addr.coordinates?.latitude,
+    Line1: fields.line1,
+    Line2: fields.line2 ?? "",
+    Line3: fields.line3 ?? "",
+    City: fields.city,
+    StateOrProvinceCode: fields.state,
+    PostCode: fields.postCode ?? "",
+    CountryCode: fields.countryCode,
+    Longitude: fields.coordinates?.longitude,
+    Latitude: fields.coordinates?.latitude,
   };
+}
+
+function mapAddress(addr: Address): AramexPartyAddress {
+  return buildPartyAddress({
+    line1: addr.line1,
+    line2: addr.line2,
+    line3: addr.neighbourhood,
+    city: addr.city,
+    state: addr.state,
+    postCode: addr.postalCode,
+    countryCode: addr.countryCode,
+    coordinates: addr.coordinates,
+  });
 }
 
 /**
@@ -425,18 +451,14 @@ export function mapPickupRequest(
 
   return {
     Reference1: input.trackingNumbers?.[0],
-    // Aramex's WCF `Address` contract marks Line2, Line3 and PostCode as REQUIRED
-    // members (identical to the Shipper/Consignee addresses built by mapAddress) —
-    // omitting them fails deserialization ("required data members 'Line2, Line3,
-    // PostCode' were not found"). Send them as empty strings when unset.
-    PickupAddress: {
-      Line1: input.address,
-      Line2: "",
-      Line3: "",
-      City: input.city,
-      PostCode: "",
-      CountryCode: ctx.countryCode,
-    },
+    // Routed through buildPartyAddress so the pickup address carries the same
+    // WCF-required members (Line2/Line3/PostCode) as shipper/consignee — a
+    // hand-built address that omits them fails Aramex deserialization.
+    PickupAddress: buildPartyAddress({
+      line1: input.address,
+      city: input.city,
+      countryCode: ctx.countryCode,
+    }),
     PickupContact: buildContact({
       personName: input.contactName,
       companyName: ctx.companyName ?? input.contactName,

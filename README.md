@@ -205,10 +205,38 @@ const result = await aramex.track(shipment.trackingNumber);
 **Product group / type & payment** — ShipFlow infers `DOM` (domestic) when shipper and consignee
 share a country, else `EXP`, and picks a sensible default product type (`OND` for domestic, `EPX`
 for express). Override with `serviceType` (a valid Aramex code) or
-`options.metadata.productGroup` / `productType`. The freight **`PaymentType`** defaults to `P`
-(prepaid) and is independent of COD — enabling COD adds the `CODS` service and the cash amount to
-collect, but does not charge freight to the consignee. Override the freight payer with
-`options.metadata.paymentType` (`"C"` = collect, `"3"` = third party).
+`options.metadata.productGroup` / `productType`.
+
+The freight **`PaymentType`** — who pays the *shipping cost* — defaults to `P` and is independent
+of COD: enabling COD adds the `CODS` service and the cash amount to collect from the consignee, but
+does **not** charge them freight. Override the freight payer with `options.metadata.paymentType`:
+
+| Value | Freight billed to | When to use |
+| ----- | ----------------- | ----------- |
+| `"P"` _(default)_ | Shipper's Aramex account (prepaid) | Standard KSA/GCC e-commerce — merchant pays shipping, even with COD |
+| `"C"` | Consignee, collected at delivery | Customer pays shipping on top of any COD |
+| `"3"` | A third-party account | Freight billed to someone other than shipper/consignee |
+
+```typescript
+// Default: COD shipment with prepaid freight (PaymentType "P")
+await aramex.createShipment({
+  ...input,
+  cod: { enabled: true, amount: 150, currency: "SAR" }, // freight stays "P"
+});
+
+// Override: charge the customer freight at the door (PaymentType "C")
+await aramex.createShipment({
+  ...input,
+  cod: { enabled: true, amount: 150, currency: "SAR" },
+  options: { metadata: { paymentType: "C" } },
+});
+
+// Override: bill freight to a third party (PaymentType "3")
+await aramex.createShipment({
+  ...input,
+  options: { metadata: { paymentType: "3" } },
+});
+```
 
 > Aramex does not push webhooks — poll `track()` / `trackMultiple()` for status updates.
 > Tracking `UpdateCode`s vary by region and aren't fully published, so ShipFlow maps known codes
