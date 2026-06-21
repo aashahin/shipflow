@@ -768,7 +768,7 @@ describe("SMSAExpressAdapter", () => {
       expect(result).toBe(true);
     });
 
-    test("returns false for non-cancelled string response", async () => {
+    test("throws when the carrier does not confirm cancellation (e.g. B2C)", async () => {
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify("Shipment not found or already processed"),
@@ -778,8 +778,9 @@ describe("SMSAExpressAdapter", () => {
         ),
       );
 
-      const result = await adapter.cancelShipment("290000000001");
-      expect(result).toBe(false);
+      await expect(adapter.cancelShipment("290000000001")).rejects.toThrow(
+        APIError,
+      );
     });
   });
 

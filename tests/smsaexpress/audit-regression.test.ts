@@ -17,6 +17,7 @@ import {
   test,
 } from "bun:test";
 import { SMSAExpressAdapter } from "../../src/carriers/smsaexpress";
+import { APIError } from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -57,18 +58,21 @@ describe("SMSA audit regression", () => {
   });
 
   describe("plain-text (text/plain) response bodies", () => {
-    test("cancelShipment returns false for a non-cancel plain-text body", async () => {
+    test("cancelShipment rejects a non-cancel plain-text body (never reports success)", async () => {
       // Pre-audit, a text/plain body was wrapped as { text } (an object), so the
       // `typeof === string` branch was skipped and cancellation wrongly reported
-      // success. The content here does NOT contain "cancelled".
+      // success. The content here does NOT contain "cancelled", so it must be
+      // reported as a failure — now an APIError (previously `false`) so a B2C /
+      // no-op cancel is never seen as a success.
       mockFetch.mockResolvedValueOnce(
         new Response("Shipment not found or already processed", {
           headers: { "content-type": "text/plain" },
         }),
       );
 
-      const result = await adapter.cancelShipment("290000000001");
-      expect(result).toBe(false);
+      await expect(adapter.cancelShipment("290000000001")).rejects.toThrow(
+        APIError,
+      );
     });
 
     test("cancelShipment returns true for a plain-text success body", async () => {

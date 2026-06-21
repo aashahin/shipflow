@@ -122,20 +122,33 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   /**
    * Cancel a reverse-pickup (C2B) shipment.
    *
-   * **Important:** SMSA only supports cancellation for C2B/reverse-pickup shipments.
-   * Calling this on a B2C shipment will result in an API error or return `false`.
-   * B2C shipments cannot be cancelled via the SMSA API.
+   * **Important:** SMSA only supports cancellation for C2B/reverse-pickup
+   * shipments, via the C2B endpoint. B2C shipments cannot be cancelled through
+   * the SMSA API: the endpoint responds without a cancellation confirmation,
+   * which is surfaced as an {@link APIError} rather than a misleading `false`.
+   * That lets callers tell "the carrier could not cancel" apart from a genuine
+   * refusal of a cancellable shipment and fall back accordingly. Consistent with
+   * the other adapters, this method either returns `true` or throws.
    */
   async cancelShipment(trackingNumber: string): Promise<boolean> {
     const response = await this.http.post<string>(
       `/api/c2b/cancel/${encodeURIComponent(trackingNumber)}`,
     );
-    // API returns a plain-text message on success (e.g. "Shipment Cancelled
-    // Successfully!"); inspect it for confirmation. A non-string (JSON) success
-    // response is treated as success.
-    return typeof response === "string"
-      ? response.toLowerCase().includes("cancelled")
-      : true;
+    // A non-string (JSON) success response is treated as success.
+    if (typeof response !== "string") {
+      return true;
+    }
+    // Success messages contain "cancelled" (e.g. "Shipment Cancelled
+    // Successfully!"). Anything else means the carrier did NOT cancel — most
+    // commonly because this is a B2C shipment, which the SMSA API cannot cancel.
+    if (response.toLowerCase().includes("cancelled")) {
+      return true;
+    }
+    throw new APIError(
+      response.trim() ||
+        "SMSA did not confirm cancellation (B2C shipments cannot be cancelled via the SMSA API)",
+      { carrier: "smsaexpress", raw: response },
+    );
   }
 
   // =========================================================================
