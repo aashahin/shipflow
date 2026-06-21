@@ -55,7 +55,8 @@ ShipFlow's `createPickup()` validates the `PickupRequest`, builds the `Pickup` o
 
 > ShipFlow maps the single free-text `address` and `city` from `PickupRequest` into
 > `PickupAddress`; `timeSlot` is recorded in `Comments`, and ready/closing default to 09:00–17:00
-> on the pickup date.
+> on the pickup date. Like all Aramex addresses, `PickupAddress` carries the WCF-required
+> `Line2`, `Line3` and `PostCode` members (empty when unset) so deserialization doesn't fail.
 
 ## CancelPickup
 

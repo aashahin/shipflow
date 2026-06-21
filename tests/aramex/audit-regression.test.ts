@@ -278,6 +278,27 @@ describe("Aramex audit regression", () => {
       expect(pickup.carrier).toBe("aramex");
     });
 
+    test("PickupAddress carries the required WCF members (Line2/Line3/PostCode)", async () => {
+      // The WCF `Address` contract marks Line2/Line3/PostCode as required; a
+      // CreatePickup that omits them fails deserialization. They must be present
+      // (empty when unset), exactly like the Shipper/Consignee addresses.
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: false,
+          Notifications: [],
+          ProcessedPickup: { ID: "1", GUID: "abc-guid-123" },
+        }),
+      );
+      await adapter.createPickup(samplePickup());
+      const addr = JSON.parse(lastCall()[1].body as string).Pickup.PickupAddress;
+      expect(addr.Line1).toBe("King Fahd Road");
+      expect(addr.Line2).toBe("");
+      expect(addr.Line3).toBe("");
+      expect(addr.PostCode).toBe("");
+      expect(addr.City).toBe("Riyadh");
+      expect(addr.CountryCode).toBe("SA");
+    });
+
     test("createPickup id round-trips to cancelPickup as the GUID even when an ID is also present", async () => {
       // ProcessedPickup carries BOTH a numeric ID and a GUID. CancelPickup keys
       // on the GUID, so the surfaced id must be the GUID, not the ID.

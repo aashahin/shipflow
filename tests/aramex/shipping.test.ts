@@ -178,7 +178,7 @@ describe("AramexAdapter — shipping", () => {
       );
     });
 
-    test("maps COD into CashOnDeliveryAmount, PaymentType C and CODS service", async () => {
+    test("maps COD into CashOnDeliveryAmount + CODS service, keeping freight prepaid (P)", async () => {
       mockFetch.mockResolvedValueOnce(createOk());
 
       await adapter.createShipment({
@@ -192,8 +192,25 @@ describe("AramexAdapter — shipping", () => {
         Value: 150,
         CurrencyCode: "SAR",
       });
-      expect(details.PaymentType).toBe("C");
+      // COD is the cash collected for the goods (CODS service), independent of
+      // who pays freight. Freight stays prepaid so the customer isn't charged
+      // shipping at the door on top of COD (KSA/GCC e-commerce norm).
+      expect(details.PaymentType).toBe("P");
       expect(details.Services.split(",")).toContain("CODS");
+    });
+
+    test("freight PaymentType is overridable via metadata even with COD", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+
+      await adapter.createShipment({
+        ...baseInput(),
+        cod: { enabled: true, amount: 150, currency: "SAR" },
+        options: { metadata: { paymentType: "C" } },
+      });
+
+      const [, init] = firstCall();
+      const details = JSON.parse(init.body as string).Shipments[0].Details;
+      expect(details.PaymentType).toBe("C");
     });
 
     test("infers domestic ProductGroup/Type for same-country shipments", async () => {

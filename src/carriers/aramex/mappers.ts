@@ -178,10 +178,22 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
   return { productGroup, productType };
 }
 
+/**
+ * Resolve the freight PaymentType — who pays the SHIPPING cost: P = prepaid
+ * (billed to the shipper's Aramex account), C = collect (charged to the
+ * consignee), 3 = third party.
+ *
+ * This is INDEPENDENT of COD. COD is the cash collected from the consignee for
+ * the goods, carried by the `CODS` service + `CashOnDeliveryAmount` — not by
+ * PaymentType. KSA/GCC e-commerce COD is overwhelmingly prepaid freight (billed
+ * to the merchant) with the goods value collected on delivery, so freight
+ * defaults to "P". Enabling COD must NOT force freight onto the consignee.
+ * Override the freight payer with `options.metadata.paymentType`.
+ */
 function resolvePaymentType(input: CreateShipmentInput): "P" | "C" | "3" {
   const meta = getMeta(input, "paymentType");
   if (meta === "P" || meta === "C" || meta === "3") return meta;
-  return input.cod?.enabled ? "C" : "P";
+  return "P";
 }
 
 /** Aggregate parcel weights; preserve the unit when uniform, else normalize to kg. */
@@ -413,9 +425,16 @@ export function mapPickupRequest(
 
   return {
     Reference1: input.trackingNumbers?.[0],
+    // Aramex's WCF `Address` contract marks Line2, Line3 and PostCode as REQUIRED
+    // members (identical to the Shipper/Consignee addresses built by mapAddress) —
+    // omitting them fails deserialization ("required data members 'Line2, Line3,
+    // PostCode' were not found"). Send them as empty strings when unset.
     PickupAddress: {
       Line1: input.address,
+      Line2: "",
+      Line3: "",
       City: input.city,
+      PostCode: "",
       CountryCode: ctx.countryCode,
     },
     PickupContact: buildContact({

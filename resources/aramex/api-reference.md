@@ -107,7 +107,12 @@ ShipFlow infers `DOM` when shipper and consignee share a country, else `EXP`. Ov
 | `C` | Collect (used for COD) |
 | `3` | Third party |
 
-ShipFlow uses `C` when `cod.enabled`, else `P`. Override via `options.metadata.paymentType`.
+`PaymentType` is the **freight** payer and is independent of COD: ShipFlow defaults
+it to `P` (prepaid, billed to the shipper's account) — enabling COD does **not**
+change it, since COD only adds the `CODS` service + `CashOnDeliveryAmount` to collect
+the goods value from the consignee. This matches KSA/GCC e-commerce, where the
+merchant prepays freight and Aramex collects cash on delivery. Override via
+`options.metadata.paymentType` (e.g. `"C"` to charge freight to the consignee).
 
 ### Special services
 Joined comma-separated into `Details.Services`: `CODS` (cash on delivery), `INSR` (insurance).

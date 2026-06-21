@@ -1,6 +1,6 @@
 {
   "name": "shipflow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unified Shipping SDK for MENA Region — Aymakan, SMSA Express, Aramex, and more",
   "type": "module",
   "main": "./dist/index.js",

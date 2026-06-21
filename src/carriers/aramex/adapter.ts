@@ -359,7 +359,9 @@ export class AramexAdapter extends BaseCarrierAdapter {
         ShipmentNumber: trackingNumber,
         LabelInfo: DEFAULT_LABEL_INFO,
       },
-      { errorExtractor: AramexAdapter.aramexErrorExtractor },
+      // PrintLabel is a side-effect-free read (it returns a URL for an existing
+      // shipment), so it's safe to retry like the other read operations.
+      { retry: true, errorExtractor: AramexAdapter.aramexErrorExtractor },
     );
 
     const url = response.ShipmentLabel?.LabelURL;

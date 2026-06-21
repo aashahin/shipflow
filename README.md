@@ -1,6 +1,6 @@
 # ShipFlow
 
-Unified Shipping SDK for MENA region carriers. A single API to create shipments, track packages, manage labels, handle webhooks, and more — across Aymakan, SMSA Express, and future carriers.
+Unified Shipping SDK for MENA region carriers. A single API to create shipments, track packages, manage labels, handle webhooks, and more — across Aymakan, SMSA Express, Aramex, and future carriers.
 
 Think EasyPost / Shippo, but purpose-built for Saudi Arabia and the GCC.
 
@@ -25,6 +25,7 @@ bun add shipflow
 import { ShipFlow } from "shipflow";
 import { AymakanAdapter, AymakanService } from "shipflow/carriers/aymakan";
 import { SMSAExpressAdapter, SMSAService } from "shipflow/carriers/smsaexpress";
+import { AramexAdapter } from "shipflow/carriers/aramex";
 
 const client = new ShipFlow({
   adapters: [
@@ -35,6 +36,18 @@ const client = new ShipFlow({
     new SMSAExpressAdapter({
       mode: "sandbox",
       credentials: { apiKey: process.env.SMSA_API_KEY! },
+    }),
+    // Aramex auth is a ClientInfo object sent in every request body (no API key)
+    new AramexAdapter({
+      mode: "sandbox",
+      credentials: {
+        userName: process.env.ARAMEX_USERNAME!,
+        password: process.env.ARAMEX_PASSWORD!,
+        accountNumber: process.env.ARAMEX_ACCOUNT_NUMBER!,
+        accountPin: process.env.ARAMEX_ACCOUNT_PIN!,
+        accountEntity: process.env.ARAMEX_ACCOUNT_ENTITY!, // e.g. "RUH"
+        accountCountryCode: process.env.ARAMEX_ACCOUNT_COUNTRY_CODE!, // e.g. "SA"
+      },
     }),
   ],
 });
@@ -91,25 +104,26 @@ Every carrier adapter implements these **required** methods:
 
 Plus these **optional** methods (availability varies by carrier):
 
-| Method                               | Aymakan | SMSA |
-| ------------------------------------ | ------- | ---- |
-| `createBulkShipments(inputs)`        | ✅      | —    |
-| `cancelByReference(ref)`             | ✅      | —    |
-| `updateDeliveryAddress(tn, address)` | ✅      | —    |
-| `trackByReference(ref)`              | ✅      | ✅   |
-| `getBulkLabels(trackingNumbers)`     | ✅      | —    |
-| `getPickupCities()`                  | ✅      | —    |
-| `getTimeSlots(city, date)`           | ✅      | —    |
-| `createPickup(input)`                | ✅      | —    |
-| `cancelPickup(id)`                   | ✅      | —    |
-| `getPickupRequests()`                | ✅      | —    |
-| `getCities()`                        | ✅      | ✅   |
-| `getDropoffLocations()`              | ✅      | ✅   |
-| `createCustomerAddress(addr)`        | ✅      | —    |
-| `getCustomerAddresses()`             | ✅      | —    |
-| `updateCustomerAddress(id, addr)`    | ✅      | —    |
-| `deleteCustomerAddress(id)`          | ✅      | —    |
-| `parseWebhook(payload, options)`     | ✅      | ✅   |
+| Method                               | Aymakan | SMSA | Aramex |
+| ------------------------------------ | ------- | ---- | ------ |
+| `createBulkShipments(inputs)`        | ✅      | —    | ✅     |
+| `cancelByReference(ref)`             | ✅      | —    | —      |
+| `updateDeliveryAddress(tn, address)` | ✅      | —    | —      |
+| `trackByReference(ref)`              | ✅      | ✅   | ✅     |
+| `getBulkLabels(trackingNumbers)`     | ✅      | —    | —      |
+| `getPickupCities()`                  | ✅      | —    | —      |
+| `getTimeSlots(city, date)`           | ✅      | —    | —      |
+| `createPickup(input)`                | ✅      | —    | ✅     |
+| `cancelPickup(id)`                   | ✅      | —    | ✅     |
+| `getPickupRequests()`                | ✅      | —    | —      |
+| `getCities()`                        | ✅      | ✅   | ✅     |
+| `getDropoffLocations()`              | ✅      | ✅   | ✅     |
+| `createCustomerAddress(addr)`        | ✅      | —    | —      |
+| `getCustomerAddresses()`             | ✅      | —    | —      |
+| `updateCustomerAddress(id, addr)`    | ✅      | —    | —      |
+| `deleteCustomerAddress(id)`          | ✅      | —    | —      |
+| `getRates(input)`                    | —       | —    | ✅     |
+| `parseWebhook(payload, options)`     | ✅      | ✅   | —      |
 
 SMSA-specific methods:
 
@@ -123,19 +137,83 @@ SMSA-specific methods:
 
 ## Carrier Support
 
-| Feature           | Aymakan                         | SMSA Express                       |
-| ----------------- | ------------------------------- | ---------------------------------- |
-| Countries         | SA, AE, BH, KW, OM, QA          | SA, AE, BH, EG, KW, OM, QA, JO     |
-| Service types     | 10 (ONP, SDD, RVP, EXH, ...)    | 3 (EDDL, EDEL, EDCR)               |
-| Shipment creation | Single + Bulk                   | B2C + C2B + 2-Way                  |
-| COD               | ✅                              | ✅ (B2C only)                      |
-| Cancellation      | By tracking # or reference      | C2B only                           |
-| Tracking          | Single, bulk, by reference      | Single, bulk, by reference         |
-| Labels            | PDF/PNG, single + bulk          | PDF/ZPL                            |
-| Pickups           | Full lifecycle                  | —                                  |
-| Webhooks          | ✅ (with auth verification)     | ✅ (batch, with auth verification) |
-| City resolution   | Arabic ↔ English smart matching | Code-based lookup                  |
-| Rates             | ❌                              | ❌                                 |
+| Feature           | Aymakan                         | SMSA Express                       | Aramex                                 |
+| ----------------- | ------------------------------- | ---------------------------------- | -------------------------------------- |
+| Countries         | SA, AE, BH, KW, OM, QA          | SA, AE, BH, EG, KW, OM, QA, JO     | SA, AE, BH, KW, OM, QA, JO, EG, LB, IQ |
+| Service types     | 10 (ONP, SDD, RVP, EXH, ...)    | 3 (EDDL, EDEL, EDCR)               | 10 product types (OND, PPX, EPX, ...)  |
+| Shipment creation | Single + Bulk                   | B2C + C2B + 2-Way                  | Single + Bulk (native batch)           |
+| COD               | ✅                              | ✅ (B2C only)                      | ✅                                     |
+| Cancellation      | By tracking # or reference      | C2B only                           | Pickups only (no shipment cancel API)  |
+| Tracking          | Single, bulk, by reference      | Single, bulk, by reference         | Single, bulk, by reference             |
+| Labels            | PDF/PNG, single + bulk          | PDF/ZPL                            | URL (HTML/PDF)                         |
+| Pickups           | Full lifecycle                  | —                                  | Create + cancel                        |
+| Webhooks          | ✅ (with auth verification)     | ✅ (batch, with auth verification) | — (poll via tracking)                  |
+| City resolution   | Arabic ↔ English smart matching | Code-based lookup                  | Name list (FetchCities / FetchOffices) |
+| Rates             | ❌                              | ❌                                 | ✅ (CalculateRate)                     |
+
+## Aramex
+
+Aramex is integrated via the **JSON flavor of the classic `ShippingAPI.V2` services**. A few
+things make it different from the other carriers:
+
+- **Auth is a `ClientInfo` object in every request body** (no API key / header, no token
+  exchange). Pass `userName`, `password`, `accountNumber`, `accountPin`, `accountEntity` (the
+  3-letter origin office, e.g. `RUH`/`DXB`/`AMM`) and `accountCountryCode`.
+- **Four independent services on separate hosts** — Shipping, Tracking, RateCalculator, and
+  Location. The adapter holds one HTTP client per service and routes automatically. If your
+  account provisions the Location service on a different host (some WSDLs use `anfe02.aramex.com`),
+  set `locationBaseUrl` on the config.
+- **"Fake 200 OK" errors** — Aramex returns HTTP 200 even on logical failures, with
+  `HasErrors: true` + `Notifications[]`. ShipFlow surfaces these as `APIError`, including
+  per-shipment errors inside an otherwise-clean `CreateShipments` batch.
+- **Rates are supported** (`getRates` → `CalculateRate`), unlike Aymakan/SMSA.
+- **`cancelShipment` is unsupported** (the classic API has no shipment-cancel operation) and
+  throws `UnsupportedOperationError`. Pickups can be cancelled via `cancelPickup`.
+- **Labels resolve to a URL** — the `format` argument of `getLabel` can't be honored.
+
+```typescript
+import { AramexAdapter, AramexProductType } from "shipflow/carriers/aramex";
+
+const aramex = client.carrier("aramex");
+
+// Create a domestic COD shipment (freight prepaid, cash collected on delivery)
+const shipment = await aramex.createShipment({
+  shipper: {
+    name: "My Store",
+    company: "ShipFlow",
+    phone: "966500000000",
+    line1: "King Fahd Road",
+    city: "Riyadh",
+    countryCode: "SA",
+  },
+  consignee: {
+    name: "Customer",
+    phone: "966500000001",
+    line1: "Prince Sultan Road",
+    city: "Jeddah",
+    countryCode: "SA",
+  },
+  parcels: [{ weight: { value: 1, unit: "kg" }, pieces: 1 }],
+  cod: { enabled: true, amount: 150, currency: "SAR" },
+});
+
+// Quote a rate, then track
+const rates = await aramex.getRates!(input);
+const result = await aramex.track(shipment.trackingNumber);
+```
+
+**Product group / type & payment** — ShipFlow infers `DOM` (domestic) when shipper and consignee
+share a country, else `EXP`, and picks a sensible default product type (`OND` for domestic, `EPX`
+for express). Override with `serviceType` (a valid Aramex code) or
+`options.metadata.productGroup` / `productType`. The freight **`PaymentType`** defaults to `P`
+(prepaid) and is independent of COD — enabling COD adds the `CODS` service and the cash amount to
+collect, but does not charge freight to the consignee. Override the freight payer with
+`options.metadata.paymentType` (`"C"` = collect, `"3"` = third party).
+
+> Aramex does not push webhooks — poll `track()` / `trackMultiple()` for status updates.
+> Tracking `UpdateCode`s vary by region and aren't fully published, so ShipFlow maps known codes
+> and falls back to a description-keyword heuristic (then `"unknown"`) — an unmapped code never
+> breaks tracking.
 
 ## Webhook Handling
 
