@@ -20,7 +20,7 @@ export class ShipFlow {
     this.adapters = new Map();
 
     for (const adapter of options.adapters) {
-      this.adapters.set(adapter.name, adapter);
+      this.adapters.set(adapter.name.toLowerCase(), adapter);
     }
   }
 

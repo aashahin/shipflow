@@ -17,7 +17,11 @@ import {
   test,
 } from "bun:test";
 import { AymakanAdapter } from "../../src/carriers/aymakan";
-import { APIError, ValidationError } from "../../src/core/errors";
+import {
+  APIError,
+  ValidationError,
+  WebhookVerificationError,
+} from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -577,6 +581,124 @@ describe("Aymakan audit regression", () => {
       );
 
       await expect(adapter.getPickupRequests()).rejects.toThrow(APIError);
+    });
+  });
+
+  // ==========================================================================
+  // FIX #4 — missing tracking_info must not crash the batch
+  // ==========================================================================
+
+  describe("track with missing tracking_info (FIX #4)", () => {
+    test("a shipment record without a tracking_info field does not throw", async () => {
+      // The old code called data.tracking_info.map(...) directly, which throws
+      // a TypeError when a record omits tracking_info and fails the whole batch.
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          data: {
+            shipments: [
+              {
+                tracking_number: "AY1",
+                reference: null,
+                status: "Received at Warehouse", // human label, no events
+                status_label: "Received at Warehouse",
+                cod_amount: null,
+                weight: "1.00",
+                pieces: 1,
+                // tracking_info intentionally omitted
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await adapter.track("AY1");
+      // Status is derived from the top-level human label, events are empty.
+      expect(result.events).toEqual([]);
+      expect(result.status).toBe("at_warehouse");
+    });
+  });
+
+  // ==========================================================================
+  // FIX #6 — contains-match must not reroute a distinct longer city
+  // ==========================================================================
+
+  describe("resolveCity contains-match guard (FIX #6)", () => {
+    test("a distinct longer city is not silently rerouted to a shorter candidate", async () => {
+      // Cities cache has "Riyadh" (and NOT "Riyadh Al Khabra"). The old step-5
+      // reverse-direction match (input contains candidate name) rerouted
+      // "Riyadh Al Khabra" -> "Riyadh". It must now pass through unchanged.
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          shipping: {
+            tracking_number: "AY400",
+            reference: null,
+            status: "AY-0001",
+            status_label: "AWB created at origin",
+            cod_amount: null,
+            declared_value: 1,
+            currency: "SAR",
+            created_at: "2026-01-22T10:00:00.000000Z",
+            weight: 1,
+            pieces: 1,
+            is_reverse_pickup: 0,
+            label: "",
+            pdf_label: "",
+          },
+        }),
+      );
+
+      const input = sampleInput();
+      await adapter.createShipment({
+        ...input,
+        consignee: { ...input.consignee, city: "Riyadh Al Khabra" },
+      });
+
+      const [, init] = lastCall();
+      const body = JSON.parse(init.body as string);
+      expect(body.delivery_city).toBe("Riyadh Al Khabra");
+      expect(body.delivery_city).not.toBe("Riyadh");
+    });
+  });
+
+  // ==========================================================================
+  // FIX #7 — webhook auth is verified before payload-shape validation
+  // ==========================================================================
+
+  describe("webhook auth precedes payload validation (FIX #7)", () => {
+    test("a wrong auth header on an invalid payload throws WebhookVerificationError, not ValidationError", () => {
+      // Payload is missing required fields AND the auth header is wrong. Auth
+      // must be checked first, so an unauthenticated caller never learns about
+      // payload-shape validation.
+      expect(() =>
+        adapter.parseWebhook(
+          { garbage: true },
+          {
+            headers: { "x-aymakan-auth": "wrong-secret" },
+            config: {
+              authHeader: "X-Aymakan-Auth",
+              authValue: "correct-secret",
+            },
+          },
+        ),
+      ).toThrow(WebhookVerificationError);
+    });
+
+    test("a missing auth header on an invalid payload also throws WebhookVerificationError", () => {
+      expect(() =>
+        adapter.parseWebhook(
+          { garbage: true },
+          {
+            headers: {},
+            config: {
+              authHeader: "X-Aymakan-Auth",
+              authValue: "correct-secret",
+            },
+          },
+        ),
+      ).toThrow(WebhookVerificationError);
     });
   });
 });

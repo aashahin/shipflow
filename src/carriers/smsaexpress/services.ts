@@ -19,7 +19,9 @@ export type SMSAServiceType = (typeof SMSAService)[keyof typeof SMSAService];
  * SMSA Express Scan Type Codes → Unified ShipmentStatus mapping.
  *
  * Based on /api/track/statuslookup response.
- * Scan types not explicitly listed default to "in_transit".
+ * Scan types not explicitly listed default to "unknown" (see mapSMSAStatus)
+ * so operators can detect unmapped codes instead of silently treating them
+ * as in-transit.
  */
 export const SMSAStatusCodes: Record<string, string> = {
   // Delivery

@@ -103,7 +103,7 @@ function mapNationalAddress(
 }
 
 /** Strip non-digit characters from phone numbers (Aymakan requires digits only) */
-function sanitizePhone(phone: string): string {
+export function sanitizePhone(phone: string): string {
   return phone.replace(/\D/g, '');
 }
 
@@ -302,7 +302,7 @@ export function mapTrackingEvent(event: AymakanTrackingEvent): TrackingEvent {
 export function mapTrackingResult(
   data: AymakanTrackShipmentData,
 ): TrackingResult {
-  const events = data.tracking_info.map(mapTrackingEvent);
+  const events = (data.tracking_info ?? []).map(mapTrackingEvent);
 
   // The top-level `status` field is a human-readable label on the /track
   // endpoint (e.g. "Received at Warehouse") and an AY code on /by_reference.
@@ -311,19 +311,25 @@ export function mapTrackingResult(
   // status. The fallback tries the AY-code map first (handles /by_reference)
   // and then the human-label map (handles /track), so a real state is recovered
   // even when there are no events, then "unknown".
-  const latestEvent = events.length
-    ? [...events].sort(
-        (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
-      )[0]
-    : undefined;
+  const sortedEvents = events.length
+    ? [...events].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+    : [];
+  // Some event codes aren't in AymakanStatusCodes and map to "unknown" — scan
+  // back through older events (newest-first) for the most recent one we can
+  // actually recognize, instead of giving up as soon as the latest is unknown.
+  const mostRecentRecognizedEvent = sortedEvents.find(
+    (e) => e.status !== "unknown",
+  );
   let status: ShipmentStatus;
-  if (latestEvent && latestEvent.status !== "unknown") {
-    status = latestEvent.status;
+  if (mostRecentRecognizedEvent) {
+    status = mostRecentRecognizedEvent.status;
   } else {
+    // No recognizable event (or none at all) — derive from the top-level
+    // status: AY-code map first (/by_reference), then human-label map (/track),
+    // else "unknown".
     status =
       mapAymakanStatus(data.status) ??
       mapAymakanStatusLabel(data.status) ??
-      latestEvent?.status ??
       "unknown";
   }
 
@@ -410,22 +416,9 @@ export function parseAymakanWebhook(
 ): WebhookEvent {
   const { headers = {}, queryParams = {}, config } = options ?? {};
 
-  // Validate required fields
-  if (
-    !payload ||
-    typeof payload !== "object" ||
-    !("tracking_number" in payload) ||
-    !("status" in payload)
-  ) {
-    throw new ValidationError(
-      "Invalid webhook payload: missing required fields",
-      {
-        raw: payload,
-      },
-    );
-  }
-
-  const data = payload as AymakanWebhookPayload;
+  // Verify auth FIRST, before inspecting the payload shape. These checks depend
+  // only on `options` (headers/queryParams/config), so an unauthenticated caller
+  // is rejected before any payload-validation detail can leak back to them.
 
   // Verify auth via header (case-insensitive lookup, timing-safe comparison)
   if (config?.authHeader && config?.authValue) {
@@ -449,6 +442,23 @@ export function parseAymakanWebhook(
       });
     }
   }
+
+  // Validate required fields (only after auth has passed)
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("tracking_number" in payload) ||
+    !("status" in payload)
+  ) {
+    throw new ValidationError(
+      "Invalid webhook payload: missing required fields",
+      {
+        raw: payload,
+      },
+    );
+  }
+
+  const data = payload as AymakanWebhookPayload;
 
   const eventType = data.event ?? "status_update";
 

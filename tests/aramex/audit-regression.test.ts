@@ -16,6 +16,7 @@ import {
   test,
 } from "bun:test";
 import { AramexAdapter } from "../../src/carriers/aramex";
+import { resolveProductGroupAndType } from "../../src/carriers/aramex/mappers";
 import { APIError, UnsupportedOperationError } from "../../src/core/errors";
 import type { CreateShipmentInput, PickupRequest } from "../../src/core/types";
 
@@ -388,5 +389,48 @@ describe("Aramex audit regression", () => {
         UnsupportedOperationError,
       );
     });
+  });
+
+  // An explicit valid product type must dictate the group so the DOM/EXP + type
+  // pair is always valid — OND is the ONLY domestic type, everything else is
+  // express. Guards against the old bug where the group came from the
+  // same-country heuristic while the type was validated independently, yielding
+  // invalid combos like DOM+PPX or EXP+OND.
+  describe("productGroup/type pair stays consistent (fix #5)", () => {
+    // A cross-country variant of sampleInput (shipper SA, consignee AE).
+    const crossCountryInput = (): CreateShipmentInput => {
+      const input = sampleInput();
+      input.consignee.countryCode = "AE";
+      return input;
+    };
+
+    test.each<[string, () => CreateShipmentInput, "DOM" | "EXP", string]>([
+      // An explicit valid type dictates the group, so no invalid pair is formed:
+      ["same-country + PPX", () => ({ ...sampleInput(), serviceType: "PPX" }), "EXP", "PPX"],
+      ["cross-country + OND", () => ({ ...crossCountryInput(), serviceType: "OND" }), "DOM", "OND"],
+      // A valid type even overrides a conflicting metadata productGroup (DOM+PPX
+      // would be invalid, so PPX forces EXP):
+      [
+        "valid type beats conflicting metadata group",
+        () => ({
+          ...sampleInput(),
+          serviceType: "PPX",
+          options: { metadata: { productGroup: "DOM" } },
+        }),
+        "EXP",
+        "PPX",
+      ],
+      // No explicit type → same-country/cross-country defaults (unchanged):
+      ["same-country default", sampleInput, "DOM", "OND"],
+      ["cross-country default", crossCountryInput, "EXP", "EPX"],
+    ])(
+      "%s resolves %s+%s",
+      (_scenario, makeInput, expectedGroup, expectedType) => {
+        const { productGroup, productType } =
+          resolveProductGroupAndType(makeInput());
+        expect(productGroup).toBe(expectedGroup);
+        expect(productType).toBe(expectedType);
+      },
+    );
   });
 });

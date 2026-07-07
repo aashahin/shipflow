@@ -95,11 +95,20 @@ export function statusFromDescription(
   const d = description.toLowerCase();
   if (/out for delivery|on delivery|with delivery courier/.test(d))
     return "out_for_delivery";
-  // Failure phrases must be checked before the generic "deliver" match, so
-  // "delivery failed" / "undeliverable" aren't mistaken for a delivery.
-  if (/fail|unable|undeliver|exception|held|on hold|problem|refused|damaged/.test(d))
+  // Failure/non-terminal phrases must be checked before the generic "deliver"
+  // match, so "delivery failed", "delivery attempt", "rescheduled", etc.
+  // aren't mistaken for a completed delivery — "delivery attempt" and
+  // "out for delivery" both contain "deliver" but are NOT terminal states.
+  if (
+    /fail|unable|undeliver|exception|held|on hold|problem|refused|damaged|attempt|reschedul|not home|no answer|redeliver|not available|unavailable/.test(
+      d,
+    )
+  )
     return "exception";
-  if (/deliver/.test(d)) return "delivered";
+  // Require a stronger positive signal before declaring terminal "delivered"
+  // from free text — a bare "delivery"/"deliver" mention (e.g. an
+  // unrecognized in-progress update) must not be promoted to terminal.
+  if (/delivered|signed|proof of delivery|\bpod\b/.test(d)) return "delivered";
   if (/return/.test(d)) return "returned";
   if (/cancel/.test(d)) return "cancelled";
   if (/picked up|collected|pickup/.test(d)) return "picked_up";
@@ -147,9 +156,16 @@ function getMeta(
 }
 
 /**
- * Resolve ProductGroup (DOM/EXP) and ProductType. Defaults to domestic when
- * shipper and consignee share a country, else express. Overridable via
- * `serviceType` (a valid Aramex product code) or `options.metadata`.
+ * Resolve ProductGroup (DOM/EXP) and ProductType as a always-consistent pair.
+ * Defaults to domestic when shipper and consignee share a country, else express.
+ * Overridable via `serviceType` (a valid Aramex product code) or
+ * `options.metadata`.
+ *
+ * An explicit VALID product type dictates the group — DOM for `OND` (the only
+ * domestic type; see services.ts), EXP for every other product type — and wins
+ * over an explicit metadata `productGroup`. This keeps the DOM/EXP + type pair
+ * valid, so an override can never form an invalid combo (e.g. DOM+PPX or
+ * EXP+OND).
  */
 export function resolveProductGroupAndType(input: CreateShipmentInput): {
   productGroup: "EXP" | "DOM";
@@ -159,21 +175,26 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
     input.shipper.countryCode.trim().toUpperCase() ===
     input.consignee.countryCode.trim().toUpperCase();
 
+  const candidate = getMeta(input, "productType") ?? input.serviceType;
+  const validCandidate =
+    candidate && VALID_PRODUCT_TYPES.has(candidate) ? candidate : undefined;
+
   const metaGroup = getMeta(input, "productGroup")?.toUpperCase();
-  const productGroup: "EXP" | "DOM" =
-    metaGroup === "EXP" || metaGroup === "DOM"
+  const productGroup: "EXP" | "DOM" = validCandidate
+    ? validCandidate === AramexProductType.DOMESTIC
+      ? "DOM"
+      : "EXP"
+    : metaGroup === "EXP" || metaGroup === "DOM"
       ? metaGroup
       : sameCountry
         ? "DOM"
         : "EXP";
 
-  const candidate = getMeta(input, "productType") ?? input.serviceType;
   const productType =
-    candidate && VALID_PRODUCT_TYPES.has(candidate)
-      ? candidate
-      : productGroup === "DOM"
-        ? AramexProductType.DOMESTIC
-        : AramexProductType.ECONOMY_PARCEL_EXPRESS;
+    validCandidate ??
+    (productGroup === "DOM"
+      ? AramexProductType.DOMESTIC
+      : AramexProductType.ECONOMY_PARCEL_EXPRESS);
 
   return { productGroup, productType };
 }
@@ -181,7 +202,15 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
 /**
  * Resolve the freight PaymentType — who pays the SHIPPING cost: P = prepaid
  * (billed to the shipper's Aramex account), C = collect (charged to the
- * consignee), 3 = third party.
+ * consignee).
+ *
+ * "3" (third party) is intentionally NOT selectable here: Aramex's
+ * ThirdParty payer requires a full `ThirdParty` party (address + contact) on
+ * the shipment, which the unified `CreateShipmentInput` has no field to
+ * supply — `mapCreateShipmentRequest` always sends `ThirdParty: null`. Letting
+ * callers pick PaymentType "3" via metadata would silently produce an invalid
+ * combination (third-party payer, no third party), so the override is
+ * restricted to the two payment types we can actually satisfy.
  *
  * This is INDEPENDENT of COD. COD is the cash collected from the consignee for
  * the goods, carried by the `CODS` service + `CashOnDeliveryAmount` — not by
@@ -190,9 +219,9 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
  * defaults to "P". Enabling COD must NOT force freight onto the consignee.
  * Override the freight payer with `options.metadata.paymentType`.
  */
-function resolvePaymentType(input: CreateShipmentInput): "P" | "C" | "3" {
+function resolvePaymentType(input: CreateShipmentInput): "P" | "C" {
   const meta = getMeta(input, "paymentType");
-  if (meta === "P" || meta === "C" || meta === "3") return meta;
+  if (meta === "P" || meta === "C") return meta;
   return "P";
 }
 
@@ -445,9 +474,13 @@ export function mapPickupRequest(
   input: PickupRequest,
   ctx: AramexPickupContext,
 ): AramexPickupObject {
-  const pickupDate = new Date(`${input.date}T00:00:00`);
-  const ready = new Date(`${input.date}T09:00:00`);
-  const closing = new Date(`${input.date}T17:00:00`);
+  // Aramex pickup windows are wall-clock times in Saudi local time (UTC+3)
+  // with no timezone marker. Parsing without an explicit offset would use the
+  // host's local timezone, shifting the epoch (e.g. by 3h on a UTC host) —
+  // pin the offset explicitly, matching the Aymakan mapper's approach.
+  const pickupDate = new Date(`${input.date}T00:00:00+03:00`);
+  const ready = new Date(`${input.date}T09:00:00+03:00`);
+  const closing = new Date(`${input.date}T17:00:00+03:00`);
 
   return {
     Reference1: input.trackingNumbers?.[0],
@@ -585,8 +618,9 @@ export function normalizeTrackingResults(
  * Build a placeholder `TrackingResult` for a waybill Aramex reports under
  * `NonExistingWaybills`. Aramex splits the TrackShipments response into found
  * (`TrackingResults`) and not-found (`NonExistingWaybills`) buckets; emitting an
- * "unknown" entry for the latter keeps the returned array aligned to the input
- * waybills so callers can map inputs→results positionally/by trackingNumber.
+ * "unknown" entry for the latter ensures no input waybill is silently dropped,
+ * so callers can map inputs→results by trackingNumber (results are keyed by
+ * trackingNumber, not positionally aligned to the input array).
  */
 export function mapNonExistingWaybill(waybill: string): TrackingResult {
   return {

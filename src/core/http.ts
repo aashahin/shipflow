@@ -197,7 +197,10 @@ export class HttpClient {
           ...this.config.headers,
           ...headers,
         },
-        body: body ? JSON.stringify(body) : undefined,
+        // `!== undefined` (not truthiness): a genuinely absent body is omitted,
+        // but valid falsy JSON bodies (0, "", false) are still serialized —
+        // HttpClient is public API for custom adapters.
+        body: body !== undefined ? JSON.stringify(body) : undefined,
         signal,
       });
 
@@ -326,9 +329,33 @@ export class HttpClient {
     });
   }
 
+  /** Cap on sanitized non-JSON error bodies (e.g. HTML gateway/proxy pages). */
+  private static readonly MAX_ERROR_TEXT_LENGTH = 500;
+
+  /**
+   * Strip markup and cap the length of a raw (non-JSON) error body so a
+   * carrier's HTML gateway/proxy error page doesn't get dumped verbatim into
+   * the thrown error's message.
+   */
+  private sanitizeErrorText(text: string): string {
+    const stripped = text
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (stripped.length > HttpClient.MAX_ERROR_TEXT_LENGTH) {
+      return `${stripped.slice(0, HttpClient.MAX_ERROR_TEXT_LENGTH)}... [truncated]`;
+    }
+    return stripped;
+  }
+
   private extractErrorMessage(json: unknown): string | undefined {
-    // Some carriers return a bare plain-text error body.
-    if (typeof json === "string") return json.trim() || undefined;
+    // Some carriers return a bare plain-text error body (occasionally an HTML
+    // gateway/proxy error page rather than a carrier-authored message) —
+    // sanitize and cap it before it becomes the error message.
+    if (typeof json === "string") {
+      const trimmed = json.trim();
+      return trimmed ? this.sanitizeErrorText(trimmed) : undefined;
+    }
     if (!json || typeof json !== "object") return undefined;
     const obj = json as Record<string, unknown>;
 

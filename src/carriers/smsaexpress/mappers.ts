@@ -39,12 +39,29 @@ import type {
 // ============================================================================
 
 export function mapSMSAStatus(scanType: string): ShipmentStatus {
-  return (SMSAStatusCodes[scanType] as ShipmentStatus) ?? "in_transit";
+  return (SMSAStatusCodes[scanType] as ShipmentStatus) ?? "unknown";
+}
+
+/**
+ * Resolve a scan's Date, applying its ScanTimeZone offset when present
+ * (consistent with mapTrackingEvent / mapShipmentResponse timestamp handling).
+ */
+function scanDate(scan: SMSATrackingScan): Date {
+  return new Date(
+    scan.ScanTimeZone
+      ? `${scan.ScanDateTime}${scan.ScanTimeZone}`
+      : scan.ScanDateTime,
+  );
+}
+
+function scanTimestampMs(scan: SMSATrackingScan): number {
+  return scanDate(scan).getTime();
 }
 
 /**
  * Derive the current shipment status from tracking scans.
- * Defensively sorts by ScanDateTime descending before taking the latest.
+ * Defensively sorts by (zone-adjusted) ScanDateTime descending before taking
+ * the latest.
  */
 function deriveStatusFromScans(
   scans: SMSATrackingScan[] | undefined,
@@ -59,9 +76,7 @@ function deriveStatusFromScans(
     return { status: "unknown", statusLabel: "Unknown" };
   }
   const sorted = [...safeScans].sort(
-    (a, b) =>
-      new Date(b.ScanDateTime).getTime() -
-      new Date(a.ScanDateTime).getTime(),
+    (a, b) => scanTimestampMs(b) - scanTimestampMs(a),
   );
   const latest = sorted[0]!;
   return {
@@ -82,13 +97,43 @@ function roundWeight(weight: number): number {
   return Math.round(weight * 1000) / 1000;
 }
 
+/** Strip non-digit characters from phone numbers (SMSA requires digits only). */
+function sanitizePhone(phone: string): string {
+  return phone.replace(/\D/g, "");
+}
+
+/**
+ * Generate a fallback OrderNumber when the caller supplies no reference. Single
+ * source of the `ORD-<epoch-ms>` format — the adapter uses it to fix a reference
+ * on the input so the booked OrderNumber is surfaced back on the Shipment, and
+ * the request mappers reference it as their type-required default.
+ */
+export function generateOrderNumber(): string {
+  return `ORD-${Date.now()}`;
+}
+
+/**
+ * Format the ShipDate as the Saudi (UTC+3) wall-clock, with no zone suffix.
+ *
+ * SMSA treats a bare (zone-less) timestamp as Saudi local time (UTC+3) — its
+ * own responses come back bare and the response mapper appends `+03:00` to them.
+ * Sending `new Date().toISOString().slice(0, 19)` (zero-offset UTC wall-clock)
+ * therefore lands a day early between ~21:00–24:00 Saudi time, so shift by +3h
+ * before formatting.
+ */
+function smsaShipDate(): string {
+  return new Date(Date.now() + 3 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 19);
+}
+
 function mapAddress(
   addr: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
   opts?: { includeShortCode?: boolean },
 ): SMSAShipmentAddress {
   const result: SMSAShipmentAddress = {
     ContactName: addr.name,
-    ContactPhoneNumber: addr.phone,
+    ContactPhoneNumber: sanitizePhone(addr.phone),
     Country: addr.countryCode,
     City: addr.city,
     AddressLine1: addr.line1,
@@ -130,12 +175,14 @@ export function mapCreateB2CRequest(
   return {
     ConsigneeAddress: consigneeAddress,
     ShipperAddress: mapAddress(input.shipper),
-    OrderNumber: input.reference ?? `ORD-${Date.now()}`,
+    OrderNumber: input.reference ?? generateOrderNumber(),
     CODAmount: input.cod?.enabled ? input.cod.amount : 0,
     DeclaredValue: input.declaredValue?.amount ?? 0,
     ContentDescription: input.parcels[0]?.description ?? "Shipment contents",
     Parcels: totalPieces,
-    ShipDate: new Date().toISOString().slice(0, 19),
+    // SMSA reads bare timestamps as Saudi local time (UTC+3), so send the
+    // UTC+3 wall-clock rather than zero-offset UTC.
+    ShipDate: smsaShipDate(),
     // When COD is enabled, its currency is the amount physically collected
     // and must win over the declared-value currency.
     ShipmentCurrency:
@@ -172,12 +219,14 @@ export function mapCreateC2BRequest(
   return {
     PickupAddress: mapAddress(input.consignee, { includeShortCode: true }),
     ReturnToAddress: mapAddress(input.shipper),
-    OrderNumber: input.reference ?? `ORD-${Date.now()}`,
+    OrderNumber: input.reference ?? generateOrderNumber(),
     DeclaredValue: input.declaredValue?.amount ?? 0.1,
     ContentDescription:
       input.parcels[0]?.description ?? "Return shipment contents",
     Parcels: totalPieces,
-    ShipDate: new Date().toISOString().slice(0, 19),
+    // SMSA reads bare timestamps as Saudi local time (UTC+3), so send the
+    // UTC+3 wall-clock rather than zero-offset UTC.
+    ShipDate: smsaShipDate(),
     // When COD is enabled, its currency is the amount physically collected
     // and must win over the declared-value currency.
     ShipmentCurrency:
@@ -329,11 +378,13 @@ export function mapCreate2WayRequest(
   return {
     ConsigneeAddress: consigneeAddress,
     ShipperAddress: mapAddress(input.shipper),
-    OrderNumber: input.reference ?? `ORD-${Date.now()}`,
+    OrderNumber: input.reference ?? generateOrderNumber(),
     DeclaredValue: input.declaredValue?.amount ?? 0,
     ContentDescription: input.parcels[0]?.description ?? "Shipment contents",
     Parcels: totalPieces,
-    ShipDate: new Date().toISOString().slice(0, 19),
+    // SMSA reads bare timestamps as Saudi local time (UTC+3), so send the
+    // UTC+3 wall-clock rather than zero-offset UTC.
+    ShipDate: smsaShipDate(),
     ShipmentCurrency: input.declaredValue?.currency ?? "SAR",
     Weight: roundWeight(totalWeight),
     WeightUnit: "KG",
@@ -405,20 +456,13 @@ function mapWebhookShipmentToEvent(
     shipment.isDelivered,
   );
 
-  // Sort scans descending to get the latest one for timestamp/statusCode
+  // Sort scans descending (zone-adjusted) to get the latest one for
+  // timestamp/statusCode.
   const sorted = [...scans].sort(
-    (a, b) =>
-      new Date(b.ScanDateTime).getTime() -
-      new Date(a.ScanDateTime).getTime(),
+    (a, b) => scanTimestampMs(b) - scanTimestampMs(a),
   );
   const latestScan = sorted[0];
-  const timestamp = latestScan
-    ? new Date(
-      latestScan.ScanTimeZone
-        ? `${latestScan.ScanDateTime}${latestScan.ScanTimeZone}`
-        : latestScan.ScanDateTime,
-    )
-    : new Date();
+  const timestamp = latestScan ? scanDate(latestScan) : new Date();
 
   return {
     carrier: "smsaexpress",
@@ -431,6 +475,53 @@ function mapWebhookShipmentToEvent(
     timestamp,
     raw: shipment,
   };
+}
+
+/**
+ * Map a webhook shipment to one WebhookEvent PER scan, in chronological
+ * (oldest → newest) order.
+ *
+ * SMSA can report several new scans for the same shipment in a single
+ * webhook call (e.g. AF, OD, DL all at once). Collapsing that into only the
+ * latest scan silently drops intermediate transitions/history, so this
+ * expands every scan into its own event.
+ */
+function mapWebhookShipmentToEvents(
+  shipment: SMSAWebhookShipment,
+): WebhookEvent[] {
+  const scans = shipment.Scans ?? [];
+
+  if (scans.length === 0) {
+    // No scans to expand — fall back to the single derived (possibly
+    // "unknown"/isDelivered-driven) event.
+    return [mapWebhookShipmentToEvent(shipment)];
+  }
+
+  const sorted = [...scans].sort(
+    (a, b) => scanTimestampMs(a) - scanTimestampMs(b),
+  );
+
+  return sorted.map((scan, index) => {
+    // Only the chronologically-last scan can be elevated to "delivered" by
+    // the isDelivered flag; earlier scans reflect their own scan type.
+    const isLatest = index === sorted.length - 1;
+    const status: ShipmentStatus =
+      isLatest && shipment.isDelivered
+        ? "delivered"
+        : mapSMSAStatus(scan.ScanType);
+
+    return {
+      carrier: "smsaexpress",
+      eventType: "status_update",
+      trackingNumber: shipment.AWB,
+      reference: shipment.Reference || undefined,
+      status,
+      statusCode: scan.ScanType,
+      statusLabel: scan.ScanDescription,
+      timestamp: scanDate(scan),
+      raw: shipment,
+    };
+  });
 }
 
 function validateWebhookPayload(payload: unknown): SMSAWebhookShipment[] {
@@ -448,14 +539,13 @@ function validateWebhookPayload(payload: unknown): SMSAWebhookShipment[] {
   }
 
   for (const item of payload) {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      !("AWB" in item) ||
-      !("Scans" in item)
-    ) {
+    // Only AWB is truly required (it becomes the event's trackingNumber). Scans
+    // may be absent on a freshly-booked record — every mapper defends with
+    // `Scans ?? []` and yields an "unknown" status — so requiring it here would
+    // wrongly reject valid scan-less webhooks.
+    if (!item || typeof item !== "object" || !("AWB" in item)) {
       throw new ValidationError(
-        "Invalid SMSA webhook payload: shipment missing required fields (AWB, Scans)",
+        "Invalid SMSA webhook payload: shipment missing required field (AWB)",
         { raw: item },
       );
     }
@@ -486,10 +576,12 @@ export function parseSMSAWebhook(
 
 /**
  * Parse an SMSA webhook payload and return a WebhookEvent for every
- * shipment in the batch.
+ * scan of every shipment in the batch (in chronological order per shipment).
  *
- * SMSA sends webhook payloads as an array of shipments, each with
- * their own tracking scans.
+ * SMSA sends webhook payloads as an array of shipments, each with their own
+ * tracking scans, and a single call can carry multiple new scans for the
+ * same shipment (e.g. AF, OD, DL together) — each becomes its own event so
+ * no intermediate transition/history is dropped.
  */
 export function parseSMSAWebhookBatch(
   payload: unknown,
@@ -501,5 +593,5 @@ export function parseSMSAWebhookBatch(
 ): WebhookEvent[] {
   verifyWebhookAuth(options);
   const shipments = validateWebhookPayload(payload);
-  return shipments.map(mapWebhookShipmentToEvent);
+  return shipments.flatMap(mapWebhookShipmentToEvents);
 }

@@ -4,7 +4,7 @@
  * Full implementation of the CarrierAdapter interface for SMSA Express API.
  */
 
-import { APIError } from "../../core/errors";
+import { APIError, RateLimitError } from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import type {
   CarrierConfig,
@@ -18,6 +18,7 @@ import type {
 } from "../../core/types";
 import { BaseCarrierAdapter } from "../base";
 import {
+  generateOrderNumber,
   mapCity,
   mapCreate2WayRequest,
   mapCreateB2CRequest,
@@ -87,24 +88,41 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   // SHIPPING
   // =========================================================================
 
+  /**
+   * Ensure the input carries a `reference` so the OrderNumber the shipment is
+   * booked under is the exact value surfaced back on `Shipment.reference` (which
+   * the caller needs for {@link trackByReference}). When no reference is
+   * supplied we generate one here via the shared {@link generateOrderNumber} and
+   * pass this prepared input to BOTH the request mapper and the response mapper,
+   * so the request OrderNumber and the response reference always agree (otherwise
+   * each would call `Date.now()` independently and disagree).
+   */
+  private withOrderNumber(input: CreateShipmentInput): CreateShipmentInput {
+    if (input.reference) {
+      return input;
+    }
+    return { ...input, reference: generateOrderNumber() };
+  }
+
   protected async executeCreateShipment(
     input: CreateShipmentInput,
   ): Promise<Shipment> {
+    const prepared = this.withOrderNumber(input);
     const isC2B =
-      input.serviceType !== undefined &&
-      C2B_SERVICE_CODES.has(input.serviceType);
+      prepared.serviceType !== undefined &&
+      C2B_SERVICE_CODES.has(prepared.serviceType.trim().toUpperCase());
 
     if (isC2B) {
-      return this.createC2BShipment(input);
+      return this.createC2BShipment(prepared);
     }
 
-    const request = mapCreateB2CRequest(input);
+    const request = mapCreateB2CRequest(prepared);
     const response = await this.http.post<SMSAShipmentResponse>(
       "/api/shipment/b2c/new",
       request,
     );
 
-    return mapShipmentResponse(response, input);
+    return mapShipmentResponse(response, prepared);
   }
 
   private async createC2BShipment(
@@ -125,10 +143,17 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
    * **Important:** SMSA only supports cancellation for C2B/reverse-pickup
    * shipments, via the C2B endpoint. B2C shipments cannot be cancelled through
    * the SMSA API: the endpoint responds without a cancellation confirmation,
-   * which is surfaced as an {@link APIError} rather than a misleading `false`.
-   * That lets callers tell "the carrier could not cancel" apart from a genuine
-   * refusal of a cancellable shipment and fall back accordingly. Consistent with
-   * the other adapters, this method either returns `true` or throws.
+   * which is surfaced as an {@link APIError} (with `code: "CANCELLATION_UNCONFIRMED"`)
+   * rather than a misleading `false`. That `code` lets callers distinguish this
+   * "carrier did not confirm" case from a genuine request failure (network/4xx/5xx)
+   * and fall back accordingly. Consistent with the other adapters, this method
+   * either returns `true` or throws.
+   *
+   * Success is detected with a negation-aware check: a cancel token must be
+   * present AND no negation token may be. A bare `includes("cancelled")` would
+   * wrongly succeed on negatives like "Shipment cannot be cancelled",
+   * "not cancelled" or "cancellation failed". Note "already cancelled" carries
+   * no negation token, so it correctly reports success (idempotent cancel).
    */
   async cancelShipment(trackingNumber: string): Promise<boolean> {
     const response = await this.http.post<string>(
@@ -138,16 +163,33 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     if (typeof response !== "string") {
       return true;
     }
-    // Success messages contain "cancelled" (e.g. "Shipment Cancelled
-    // Successfully!"). Anything else means the carrier did NOT cancel — most
-    // commonly because this is a B2C shipment, which the SMSA API cannot cancel.
-    if (response.toLowerCase().includes("cancelled")) {
+    // Success messages contain a cancel token (e.g. "Shipment Cancelled
+    // Successfully!"), but so do negative ones ("Shipment cannot be cancelled",
+    // "cancellation failed"). Treat as success only when a cancel token is
+    // present AND no negation token is — so "already cancelled" (idempotent
+    // success) still passes while "not cancelled" does not. Anything else means
+    // the carrier did NOT cancel — most commonly because this is a B2C shipment,
+    // which the SMSA API cannot cancel.
+    const hasCancelToken = /cancel/i.test(response);
+    const hasNegation =
+      /\b(?:not|can\s?not|can'?t|cant|unable|fail(?:ed|ure)?|invalid|reject(?:ed)?|error)\b/i.test(
+        response,
+      );
+    if (hasCancelToken && !hasNegation) {
       return true;
     }
+    // Distinguish "carrier responded but did not confirm cancellation" from a
+    // genuine request failure (network/4xx/5xx, which throws separately via
+    // HttpClient) so callers can tell "unconfirmed" apart from "failed" and
+    // fall back accordingly (e.g. B2C shipments cannot be cancelled via the
+    // SMSA API at all).
     throw new APIError(
-      response.trim() ||
-        "SMSA did not confirm cancellation (B2C shipments cannot be cancelled via the SMSA API)",
-      { carrier: "smsaexpress", raw: response },
+      response.trim() || "SMSA did not confirm cancellation",
+      {
+        carrier: "smsaexpress",
+        code: "CANCELLATION_UNCONFIRMED",
+        raw: response,
+      },
     );
   }
 
@@ -204,11 +246,16 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
           return `data:application/pdf;base64,${waybill.awbFile}`;
         }
       } catch (error) {
-        // Only swallow 4xx API errors (shipment type mismatch / not found).
-        // Re-throw auth, network, server, and unexpected errors immediately.
+        // Only swallow genuine 4xx (non-429) API errors (shipment type mismatch
+        // / not found) so we can try the next path. Re-throw everything else:
+        //  - non-APIError → auth (AuthenticationError) and network (NetworkError)
+        //    are not APIErrors, so this clause re-throws them;
+        //  - RateLimitError → a 429 that must propagate, not masquerade as
+        //    "No label found" (it extends APIError, so guard it explicitly);
+        //  - 5xx server errors.
         if (
           !(error instanceof APIError) ||
-          error.statusCode === 401 ||
+          error instanceof RateLimitError ||
           (error.statusCode !== undefined && error.statusCode >= 500)
         ) {
           throw error;
@@ -231,6 +278,16 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
       `/api/lookup/cities/${encodeURIComponent(countryCode)}`,
     );
 
+    // Guard the shape before mapping: a non-array (e.g. an error object at
+    // HTTP 200) would otherwise throw an opaque "response.map is not a function"
+    // far from the cause.
+    if (!Array.isArray(response)) {
+      throw new APIError("SMSA cities lookup returned an unexpected shape", {
+        carrier: "smsaexpress",
+        raw: response,
+      });
+    }
+
     return response.map(mapCity);
   }
 
@@ -238,6 +295,13 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     const response = await this.http.get<SMSAOfficeLookupItem[]>(
       "/api/lookup/smsaoffices",
     );
+
+    if (!Array.isArray(response)) {
+      throw new APIError("SMSA offices lookup returned an unexpected shape", {
+        carrier: "smsaexpress",
+        raw: response,
+      });
+    }
 
     return response.map(mapOffice);
   }
@@ -247,13 +311,14 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   // =========================================================================
 
   async create2WayShipment(input: CreateShipmentInput): Promise<Shipment> {
-    const request = mapCreate2WayRequest(input);
+    const prepared = this.withOrderNumber(input);
+    const request = mapCreate2WayRequest(prepared);
     const response = await this.http.post<SMSAShipmentResponse>(
       "/api/TwoWayShipment/new",
       request,
     );
 
-    return mapShipmentResponse(response, input);
+    return mapShipmentResponse(response, prepared);
   }
 
   // =========================================================================

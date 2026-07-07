@@ -194,7 +194,9 @@ export interface AymakanTrackShipmentData {
   created_at: string;
   id_customer: number;
   is_reverse_pickup: 0 | 1;
-  tracking_info: AymakanTrackingEvent[];
+  // Optional: real API records (freshly-booked AWB, partial bulk record) can
+  // omit this entirely, so mapTrackingResult guards with `?? []`.
+  tracking_info?: AymakanTrackingEvent[];
 }
 
 export interface AymakanTrackResponse {

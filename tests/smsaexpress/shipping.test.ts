@@ -1082,7 +1082,7 @@ describe("SMSAExpressAdapter", () => {
       }
     });
 
-    test("defaults unknown scan types to in_transit", async () => {
+    test("defaults unknown scan types to unknown", async () => {
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -1105,7 +1105,7 @@ describe("SMSAExpressAdapter", () => {
       );
 
       const result = await adapter.track("TEST");
-      expect(result.status).toBe("in_transit");
+      expect(result.status).toBe("unknown");
     });
 
     test("isDelivered flag overrides scan-based status", async () => {
@@ -1576,18 +1576,35 @@ describe("SMSAExpressAdapter", () => {
       expect(event.raw).toEqual(deliveredPayload[0]);
     });
 
-    test("parses batch webhook payload (multiple shipments)", () => {
+    test("parses batch webhook payload (multiple shipments, one event per scan)", () => {
       const events = adapter.parseWebhookBatch(batchPayload);
 
-      expect(events).toHaveLength(2);
+      // Shipment 1 has 3 scans (AF, OD, DL), shipment 2 has 2 scans (AF, OD) —
+      // every scan becomes its own event so no transition history is dropped.
+      expect(events).toHaveLength(5);
 
+      // Shipment 1's events come first, in chronological (oldest → newest) order.
       expect(events[0]!.trackingNumber).toBe("231200021000");
-      expect(events[0]!.status).toBe("delivered");
+      expect(events[0]!.statusCode).toBe("AF");
+      expect(events[0]!.status).toBe("at_warehouse");
 
-      expect(events[1]!.trackingNumber).toBe("231200022000");
-      expect(events[1]!.status).toBe("out_for_delivery");
+      expect(events[1]!.trackingNumber).toBe("231200021000");
       expect(events[1]!.statusCode).toBe("OD");
-      expect(events[1]!.statusLabel).toBe("Out for Delivery");
+      expect(events[1]!.status).toBe("out_for_delivery");
+
+      expect(events[2]!.trackingNumber).toBe("231200021000");
+      expect(events[2]!.statusCode).toBe("DL");
+      expect(events[2]!.status).toBe("delivered");
+
+      // Shipment 2's events follow, also chronological.
+      expect(events[3]!.trackingNumber).toBe("231200022000");
+      expect(events[3]!.statusCode).toBe("AF");
+      expect(events[3]!.status).toBe("at_warehouse");
+
+      expect(events[4]!.trackingNumber).toBe("231200022000");
+      expect(events[4]!.status).toBe("out_for_delivery");
+      expect(events[4]!.statusCode).toBe("OD");
+      expect(events[4]!.statusLabel).toBe("Out for Delivery");
     });
 
     test("rejects non-array payload", () => {

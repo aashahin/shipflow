@@ -95,6 +95,21 @@ describe("HttpClient Retry-After / rate limiting", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  test("serializes falsy request bodies (0, false) instead of dropping them", async () => {
+    const client = new HttpClient({ baseUrl: "https://x", carrier: "test" });
+    // Fresh Response per call — a Response body can only be read once.
+    mockFetch.mockImplementation(async () => ok());
+
+    await client.post("/zero", 0);
+    await client.post("/false", false);
+
+    // mock.calls is typed for a no-arg fn; cast to inspect the fetch init.
+    const first = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
+    const second = mockFetch.mock.calls[1] as unknown as [string, RequestInit];
+    expect(first[1].body).toBe("0");
+    expect(second[1].body).toBe("false");
+  });
+
   test("maps 503 to a RateLimitError that is still an APIError", async () => {
     const client = new HttpClient({
       baseUrl: "https://x",

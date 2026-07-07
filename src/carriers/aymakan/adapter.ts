@@ -4,11 +4,7 @@
  * Full implementation of the CarrierAdapter interface for Aymakan API.
  */
 
-import {
-  APIError,
-  UnsupportedOperationError,
-  ValidationError,
-} from "../../core/errors";
+import { APIError, ValidationError } from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import {
   validateCreateShipmentInput,
@@ -38,6 +34,7 @@ import {
   mapShipmentResponse,
   mapTrackingResult,
   parseAymakanWebhook,
+  sanitizePhone,
 } from "./mappers";
 import type {
   AymakanAddressResponse,
@@ -45,6 +42,7 @@ import type {
   AymakanCitiesResponse,
   AymakanCreateShipmentResponse,
   AymakanPickupResponse,
+  AymakanShipmentResponse,
   AymakanTrackResponse,
 } from "./types";
 
@@ -67,6 +65,28 @@ const AYMAKAN_PRODUCTION_URL = "https://api.aymakan.net/v2";
  * envelopes carry a `message`); we only flag when `error`/`success:false` is
  * present, or validation `errors` exist.
  */
+/**
+ * Pull a human-readable message out of an object-shaped error value, e.g.
+ * `{ error: { message: "..." } }` or `{ error: { response: "..." } }`.
+ */
+function extractNestedMessage(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.message === "string") return obj.message;
+    if (typeof obj.response === "string") return obj.response;
+  }
+  return undefined;
+}
+
+/** Join Laravel-style `{ field: [msg, ...] }` validation errors into one string. */
+function joinFieldErrors(errors: Record<string, unknown>): string | undefined {
+  const parts = Object.values(errors)
+    .flat()
+    .filter((v): v is string => typeof v === "string");
+  return parts.length ? parts.join("; ") : undefined;
+}
+
 function aymakanErrorExtractor(json: unknown): {
   hasError: boolean;
   message?: string;
@@ -91,6 +111,10 @@ function aymakanErrorExtractor(json: unknown): {
     (typeof obj.message === "string" && obj.message) ||
     (typeof obj.response === "string" && obj.response) ||
     (typeof obj.error === "string" && obj.error) ||
+    extractNestedMessage(obj.error) ||
+    (hasValidationErrors
+      ? joinFieldErrors(obj.errors as Record<string, string[]>)
+      : undefined) ||
     undefined;
 
   return {
@@ -123,8 +147,16 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   /** Cached Aymakan cities list for city name resolution */
   private citiesCache: City[] | null = null;
   private citiesCacheTime = 0;
+  /** Timestamp of the last failed /cities fetch attempt, if any */
+  private citiesFetchFailedAt = 0;
   /** Cache TTL: 1 hour */
   private static readonly CITIES_CACHE_TTL = 60 * 60 * 1000;
+  /**
+   * After a failed /cities fetch, back off for this long before retrying so a
+   * carrier outage doesn't force every shipment/pickup call to re-attempt the
+   * multi-retry /cities request.
+   */
+  private static readonly CITIES_FAILURE_COOLDOWN = 60 * 1000;
 
   constructor(config: AymakanConfig) {
     super(config);
@@ -152,16 +184,25 @@ export class AymakanAdapter extends BaseCarrierAdapter {
    * Silently falls back to empty list on failure so shipments can still be attempted.
    */
   private async ensureCitiesLoaded(): Promise<void> {
+    const now = Date.now();
     if (
       this.citiesCache &&
-      Date.now() - this.citiesCacheTime < AymakanAdapter.CITIES_CACHE_TTL
+      now - this.citiesCacheTime < AymakanAdapter.CITIES_CACHE_TTL
     ) {
+      return;
+    }
+    // A recent failure is still in its cooldown window — skip re-attempting
+    // the /cities fetch and fall back to whatever cache we have (possibly
+    // empty), so an outage never hard-blocks shipment/pickup creation.
+    if (now - this.citiesFetchFailedAt < AymakanAdapter.CITIES_FAILURE_COOLDOWN) {
+      if (!this.citiesCache) this.citiesCache = [];
       return;
     }
     try {
       this.citiesCache = await this.getCities();
-      this.citiesCacheTime = Date.now();
+      this.citiesCacheTime = now;
     } catch {
+      this.citiesFetchFailedAt = now;
       if (!this.citiesCache) this.citiesCache = [];
     }
   }
@@ -189,7 +230,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
    * 2. Exact match on Arabic name
    * 3. Normalized Arabic match (handles tashkeel, alef variants, taa marbuta)
    * 4. Match after stripping "ال" prefix from Arabic input
-   * 5. Substring/contains match on English name (case-insensitive)
+   * 5. Candidate-contains-input match on English name (candidate name contains
+   *    the input, e.g. "Riyadh" -> "Riyadh City"; requires input length >= 3).
+   *    The reverse direction is intentionally excluded so a distinct longer
+   *    city like "Riyadh Al Khabra" is never rerouted to "Riyadh".
    *
    * Falls back to the original input if no match is found.
    */
@@ -228,13 +272,19 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     );
     if (alMatch) return alMatch.nameEn;
 
-    // 5. Contains match on English name (for partial matches like "Riyadh" in "Riyadh City")
-    const containsEn = this.citiesCache.find(
-      (c) =>
-        c.nameEn.toLowerCase().includes(lower) ||
-        lower.includes(c.nameEn.toLowerCase()),
-    );
-    if (containsEn) return containsEn.nameEn;
+    // 5. Candidate-contains-input match on English name (e.g. input "Riyadh"
+    //    resolves to the canonical "Riyadh City"). We deliberately match ONLY
+    //    this direction. The reverse direction (input contains a candidate's
+    //    name) is excluded because a longer, distinct city such as
+    //    "Riyadh Al Khabra" would otherwise be silently rerouted to "Riyadh".
+    //    Guarded by a minimum input length so very short inputs (1-2 chars)
+    //    don't spuriously substring-match many candidates.
+    if (lower.length >= 3) {
+      const containsEn = this.citiesCache.find((c) =>
+        c.nameEn.toLowerCase().includes(lower),
+      );
+      if (containsEn) return containsEn.nameEn;
+    }
 
     // No match — return as-is and let the API return a validation error
     return trimmed;
@@ -357,9 +407,12 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   ): Promise<boolean> {
     await this.ensureCitiesLoaded();
     const resolvedCity = this.resolveCity(address.city);
+    // Documented endpoint: POST /shipping/update/delivery_address with the
+    // tracking number as a `tracking` field in the JSON body (NOT in the path).
     const response = await this.http.post<{ success: boolean }>(
-      `/shipping/update_delivery_address/${encodeURIComponent(trackingNumber)}`,
+      "/shipping/update/delivery_address",
       {
+        tracking: trackingNumber,
         delivery_name: address.name,
         delivery_email: address.email,
         delivery_city: resolvedCity,
@@ -367,10 +420,11 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         delivery_neighbourhood: address.neighbourhood,
         delivery_postcode: address.postalCode,
         delivery_country: address.countryCode,
-        delivery_phone: address.phone,
+        delivery_phone: sanitizePhone(address.phone),
       },
+      this.errorOpts,
     );
-    return response.success;
+    return response.success === true;
   }
 
   // =========================================================================
@@ -505,7 +559,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         date: string;
         slots: Record<string, string>;
       };
-    }>(`/time_slots/${date}`);
+    }>(`/time_slots/${encodeURIComponent(date)}`, this.errorOpts);
 
     // Aymakan returns error responses for invalid dates (past, Fridays, etc.)
     if (!response.success || response.error || !response.data?.slots) {
@@ -581,7 +635,10 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   // =========================================================================
 
   async getCities(): Promise<City[]> {
-    const response = await this.http.get<AymakanCitiesResponse>("/cities");
+    const response = await this.http.get<AymakanCitiesResponse>(
+      "/cities",
+      this.errorOpts,
+    );
 
     if (!response.success) {
       throw new APIError("Failed to get cities", {
@@ -617,7 +674,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
         location_lat?: number | null;
         location_lng?: number | null;
       }>;
-    }>("/dropoff_locations");
+    }>("/dropoff_locations", this.errorOpts);
 
     if (!response.success) {
       throw new APIError("Failed to get dropoff locations", {
@@ -758,7 +815,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       "/address/delete",
       { body: { id }, errorExtractor: aymakanErrorExtractor },
     );
-    return response.success;
+    return response.success === true;
   }
 
   // =========================================================================
@@ -774,13 +831,5 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     },
   ): WebhookEvent {
     return parseAymakanWebhook(payload, options);
-  }
-
-  // =========================================================================
-  // NOT SUPPORTED
-  // =========================================================================
-
-  getRates(): Promise<never> {
-    throw new UnsupportedOperationError("aymakan", "getRates");
   }
 }

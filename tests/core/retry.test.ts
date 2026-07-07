@@ -131,4 +131,31 @@ describe("withRetry", () => {
     ).rejects.toBe(err);
     expect(calls).toBe(1);
   });
+
+  test("aborting during the inter-attempt backoff (not pre-aborted) stops retries", async () => {
+    // Unlike the case above (signal already aborted when the sleep begins), here
+    // the signal fires *while* the Web-standard sleep is timing out, exercising
+    // the helper's abort-listener path (clearTimeout + reject).
+    const controller = new AbortController();
+    const err = new Error("network");
+    let calls = 0;
+    const promise = withRetry(
+      async () => {
+        calls++;
+        throw err;
+      },
+      {
+        retries: 5,
+        // Deterministic >= 1000ms inter-attempt sleep so the abort below lands
+        // reliably mid-sleep rather than racing a near-zero jittered backoff.
+        retryAfterMs: () => 1000,
+        inlineCapMs: 15_000,
+        shouldRetry: () => true,
+        signal: controller.signal,
+      },
+    );
+    setTimeout(() => controller.abort(), 10);
+    await expect(promise).rejects.toBe(err);
+    expect(calls).toBe(1); // aborted mid-sleep before a second attempt ran
+  });
 });

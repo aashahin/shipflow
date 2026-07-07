@@ -14,10 +14,11 @@ import {
   describe,
   expect,
   mock,
+  setSystemTime,
   test,
 } from "bun:test";
 import { SMSAExpressAdapter } from "../../src/carriers/smsaexpress";
-import { APIError } from "../../src/core/errors";
+import { APIError, RateLimitError } from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -39,6 +40,25 @@ function lastBody(): any {
   const [, init] = calls[calls.length - 1] as unknown as [string, RequestInit];
   return JSON.parse(init.body as string);
 }
+
+/** Minimal valid domestic (SA→SA) shipment input with no reference. */
+const baseInput = (): CreateShipmentInput => ({
+  shipper: {
+    name: "Shipper",
+    phone: "966500000000",
+    line1: "A",
+    city: "Riyadh",
+    countryCode: "SA",
+  },
+  consignee: {
+    name: "Consignee",
+    phone: "966500000001",
+    line1: "B",
+    city: "Jeddah",
+    countryCode: "SA",
+  },
+  parcels: [{ weight: { value: 1, unit: "kg" }, pieces: 1 }],
+});
 
 describe("SMSA audit regression", () => {
   let adapter: SMSAExpressAdapter;
@@ -249,8 +269,7 @@ describe("SMSA audit regression", () => {
           Reference: "",
           Pieces: 1,
           CODAmount: 0,
-          // Webhook validation requires the Scans key to exist; an empty array
-          // (or, defensively, a missing one) must not crash the mapper.
+          // Empty Scans array must not crash the mapper.
           Scans: [],
         },
       ];
@@ -258,6 +277,31 @@ describe("SMSA audit regression", () => {
       const event = adapter.parseWebhook(payload);
       expect(event.status).toBe("unknown");
       expect(event.statusCode).toBe("unknown");
+    });
+
+    test("webhook with an omitted Scans key is accepted (only AWB is required)", () => {
+      // A freshly-booked webhook record may omit Scans entirely. Validation must
+      // require only AWB (used as trackingNumber), not Scans — every mapper
+      // already defends with `Scans ?? []`.
+      const payload = [
+        {
+          AWB: "290000000002",
+          Reference: "REF-2",
+          Pieces: 1,
+          CODAmount: 0,
+          // NOTE: no `Scans` key at all.
+        },
+      ];
+
+      const event = adapter.parseWebhook(payload);
+      expect(event.trackingNumber).toBe("290000000002");
+      expect(event.status).toBe("unknown");
+      expect(event.statusCode).toBe("unknown");
+
+      // A record missing AWB is still rejected.
+      expect(() => adapter.parseWebhook([{ Reference: "no-awb" }])).toThrow(
+        "missing required field (AWB)",
+      );
     });
   });
 
@@ -394,6 +438,117 @@ describe("SMSA audit regression", () => {
       });
 
       expect(lastBody().Weight).toBe(0.3);
+    });
+  });
+
+  // ==========================================================================
+  // FIX #1 — cancelShipment must not false-positive on negated messages
+  // ==========================================================================
+
+  describe("cancelShipment negation-aware success detection", () => {
+    const cancelResponse = (message: string) =>
+      new Response(JSON.stringify(message), {
+        headers: { "content-type": "application/json" },
+      });
+
+    // Each of these contains "cancel"/"cancelled" (so a bare
+    // includes("cancelled") wrongly returned true pre-fix) but is negated, so
+    // it must now throw an APIError rather than report success.
+    for (const message of [
+      "Shipment cannot be cancelled",
+      "Shipment can not be cancelled",
+      "Shipment not cancelled",
+      "Cancellation failed",
+      "Cancellation request rejected",
+      "Unable to cancel shipment",
+      "Invalid shipment: cannot cancel",
+      "Error: shipment cancellation not allowed",
+    ]) {
+      test(`throws on negated cancel message: "${message}"`, async () => {
+        mockFetch.mockResolvedValueOnce(cancelResponse(message));
+
+        await expect(adapter.cancelShipment("290000000001")).rejects.toThrow(
+          APIError,
+        );
+      });
+    }
+
+    test('"already cancelled" reports idempotent success (no negation token)', async () => {
+      mockFetch.mockResolvedValueOnce(
+        cancelResponse("Shipment already cancelled"),
+      );
+
+      const result = await adapter.cancelShipment("290000000001");
+      expect(result).toBe(true);
+    });
+  });
+
+  // ==========================================================================
+  // FIX #2 — getLabel must propagate rate-limit errors, not swallow them
+  // ==========================================================================
+
+  describe("getLabel rate-limit handling", () => {
+    test("propagates a 429 rate-limit instead of swallowing it into 'No label found'", async () => {
+      const rateLimited = () =>
+        new Response(JSON.stringify({ message: "Too Many Requests" }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        });
+      // GET retries by default (initial + 2 retries); every attempt is a 429.
+      mockFetch.mockResolvedValueOnce(rateLimited());
+      mockFetch.mockResolvedValueOnce(rateLimited());
+      mockFetch.mockResolvedValueOnce(rateLimited());
+
+      await expect(adapter.getLabel("290000000001")).rejects.toThrow(
+        RateLimitError,
+      );
+      // Must NOT fall through to the C2B query path after a throttle
+      // (3 = initial + 2 retries on the B2C path).
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ==========================================================================
+  // FIX #3 — ShipDate must reflect the Saudi (UTC+3) wall clock, not UTC
+  // ==========================================================================
+
+  describe("ShipDate UTC+3 wall clock", () => {
+    test("ShipDate rolls to the next day when Saudi wall clock has, near end-of-day UTC", async () => {
+      // 23:30 UTC on the 7th is already 02:30 on the 8th in Saudi (UTC+3). SMSA
+      // reads bare timestamps as UTC+3, so the ship date must be the 8th, not
+      // the 7th that zero-offset UTC would have produced.
+      setSystemTime(new Date("2026-07-07T23:30:00.000Z"));
+      try {
+        mockFetch.mockResolvedValueOnce(b2cResponse());
+
+        await adapter.createShipment(baseInput());
+
+        expect(lastBody().ShipDate).toBe("2026-07-08T02:30:00");
+      } finally {
+        setSystemTime();
+      }
+    });
+  });
+
+  // ==========================================================================
+  // FIX #10 — a fabricated OrderNumber must be surfaced as Shipment.reference
+  // ==========================================================================
+
+  describe("fabricated OrderNumber surfaced as reference", () => {
+    test("returns the booked OrderNumber as Shipment.reference when no reference is supplied", async () => {
+      mockFetch.mockResolvedValueOnce(b2cResponse());
+
+      // baseInput() carries no reference — the adapter must fabricate one.
+      const result = await adapter.createShipment(baseInput());
+
+      const orderNumber = lastBody().OrderNumber;
+      // The request was booked under a generated ORD-<timestamp> order number...
+      expect(orderNumber).toBeDefined();
+      expect(orderNumber).toMatch(/^ORD-\d+$/);
+      // ...and that exact value must come back as the shipment reference so the
+      // caller can later trackByReference.
+      expect(result.reference).toBeDefined();
+      expect(result.reference).toBe(orderNumber);
     });
   });
 });

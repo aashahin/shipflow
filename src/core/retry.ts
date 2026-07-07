@@ -9,12 +9,39 @@
  *   request-bound contexts, and Retry-After is a contract — don't retry early)
  * - otherwise → full-jitter exponential backoff
  *
- * The inter-attempt sleep uses `node:timers/promises` with an AbortSignal so a
- * caller cancellation cleans up the timer (no zombie retries, no leaked `abort`
- * listeners). Never hand-roll `new Promise(r => setTimeout(r, ms))` here.
+ * The inter-attempt sleep uses a Web-standard abortable `sleep` helper (defined
+ * below) rather than `node:timers/promises`, so ShipFlow stays runtime-agnostic:
+ * `node:timers/promises` requires `nodejs_compat` on Cloudflare Workers and fails
+ * at module load on other edge runtimes — even for callers who never retry. The
+ * helper is built deliberately on globals available on Node 18+, Deno, Bun, and
+ * edge/workers (setTimeout/clearTimeout, DOMException, AbortSignal), and removes
+ * its `abort` listener on normal resolution so a caller's signal never
+ * accumulates leaked listeners across attempts.
  */
 
-import { setTimeout as sleep } from "node:timers/promises";
+/**
+ * Web-standard abortable sleep. Resolves after `ms`, or rejects with an
+ * `AbortError` `DOMException` if `signal` is (or becomes) aborted. Cleans up
+ * after itself either way: the timer is cleared on abort, and the abort
+ * listener is removed on normal resolution so nothing leaks across retries.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export interface RetryOptions {
   /** Max number of retries after the first attempt. */
@@ -72,7 +99,7 @@ export async function withRetry<T>(
       }
 
       try {
-        await sleep(delay, undefined, { signal });
+        await sleep(delay, signal);
       } catch {
         // Aborted mid-sleep → stop retrying and surface the original error.
         throw error;

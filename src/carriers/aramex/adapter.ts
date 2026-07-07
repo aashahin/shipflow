@@ -424,8 +424,10 @@ export class AramexAdapter extends BaseCarrierAdapter {
 
     // Aramex returns not-found waybills in a separate NonExistingWaybills bucket
     // rather than as empty TrackingResults. Surface them as "unknown" entries so
-    // the returned array stays aligned to the input waybills (callers can map
-    // inputs→results); silently dropping them desynchronizes that mapping.
+    // no input waybill is silently dropped. Results are keyed by trackingNumber,
+    // NOT positionally aligned to the input array: found entries come first (in
+    // response-map order) followed by the not-found entries appended after, so
+    // callers must match inputs→results by trackingNumber, not by index.
     const nonExisting = (response.NonExistingWaybills ?? []).map(
       mapNonExistingWaybill,
     );
