@@ -4,7 +4,12 @@
  * Full implementation of the CarrierAdapter interface for SMSA Express API.
  */
 
-import { APIError, RateLimitError } from "../../core/errors";
+import {
+  CITIES_CACHE_TTL,
+  CITIES_FAILURE_COOLDOWN,
+  findCityMatch,
+} from "../../core/city-resolver";
+import { APIError, RateLimitError, ValidationError } from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import type {
   CarrierConfig,
@@ -67,6 +72,12 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
 
   private http: HttpClient;
 
+  /** Cached SMSA Saudi cities list for city validation on booking */
+  private citiesCache: City[] | null = null;
+  private citiesCacheTime = 0;
+  /** Timestamp of the last failed cities-lookup attempt, if any */
+  private citiesFetchFailedAt = 0;
+
   constructor(config: SMSAExpressConfig) {
     super(config);
     this.http = new HttpClient({
@@ -104,10 +115,77 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     return { ...input, reference: generateOrderNumber() };
   }
 
+  /**
+   * Load the SMSA Saudi cities list and cache it, mirroring the Aymakan
+   * adapter's TTL + failure-cooldown behavior: a lookup outage falls back to
+   * an empty cache (pass-through resolution) so it never blocks bookings.
+   */
+  private async ensureCitiesLoaded(): Promise<void> {
+    const now = Date.now();
+    if (this.citiesCache && now - this.citiesCacheTime < CITIES_CACHE_TTL) {
+      return;
+    }
+    if (now - this.citiesFetchFailedAt < CITIES_FAILURE_COOLDOWN) {
+      if (!this.citiesCache) this.citiesCache = [];
+      return;
+    }
+    try {
+      this.citiesCache = await this.getCities();
+      this.citiesCacheTime = now;
+    } catch {
+      this.citiesFetchFailedAt = now;
+      if (!this.citiesCache) this.citiesCache = [];
+    }
+  }
+
+  /**
+   * Validate/normalize a Saudi address city against SMSA's own city list
+   * before booking (SMSA's City field is list-validated server-side, so an
+   * unknown value previously produced an opaque carrier rejection). Strict:
+   * when the list is loaded and nothing matches, fail fast with a clear,
+   * field-scoped error. Lenient when the list is unavailable (outage) and for
+   * non-SA addresses, whose cities are not in the SA lookup.
+   */
+  private resolveCityStrict(
+    address: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
+    field: "shipper.city" | "consignee.city",
+  ): string {
+    if (address.countryCode !== "SA") return address.city;
+    if (!this.citiesCache || this.citiesCache.length === 0) return address.city;
+    const match = findCityMatch(address.city, this.citiesCache);
+    if (!match) {
+      throw new ValidationError(
+        `Unknown ${field.replace(".city", "")} city "${address.city}": not in SMSA's supported city list`,
+        { field },
+      );
+    }
+    return match.nameEn;
+  }
+
+  /** Resolve shipper + consignee cities for a booking (strict — see above). */
+  private async resolveCitiesInInput(
+    input: CreateShipmentInput,
+  ): Promise<CreateShipmentInput> {
+    await this.ensureCitiesLoaded();
+    return {
+      ...input,
+      shipper: {
+        ...input.shipper,
+        city: this.resolveCityStrict(input.shipper, "shipper.city"),
+      },
+      consignee: {
+        ...input.consignee,
+        city: this.resolveCityStrict(input.consignee, "consignee.city"),
+      },
+    };
+  }
+
   protected async executeCreateShipment(
     input: CreateShipmentInput,
   ): Promise<Shipment> {
-    const prepared = this.withOrderNumber(input);
+    const prepared = await this.resolveCitiesInInput(
+      this.withOrderNumber(input),
+    );
     const isC2B =
       prepared.serviceType !== undefined &&
       C2B_SERVICE_CODES.has(prepared.serviceType.trim().toUpperCase());
@@ -311,7 +389,9 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   // =========================================================================
 
   async create2WayShipment(input: CreateShipmentInput): Promise<Shipment> {
-    const prepared = this.withOrderNumber(input);
+    const prepared = await this.resolveCitiesInInput(
+      this.withOrderNumber(input),
+    );
     const request = mapCreate2WayRequest(prepared);
     const response = await this.http.post<SMSAShipmentResponse>(
       "/api/TwoWayShipment/new",

@@ -24,6 +24,18 @@ import type { CreateShipmentInput } from "../../src/core/types";
 const originalFetch = globalThis.fetch;
 const mockFetch = mock(async () => new Response());
 
+/** Mock response for the SA cities lookup consumed by booking-time city validation */
+const smsaCitiesLookup = () =>
+  new Response(
+    JSON.stringify([
+      { cityName: "Riyadh", cityCode: "RUH", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+      { cityName: "Jeddah", cityCode: "JED", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+      { cityName: "Dammam", cityCode: "DMM", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+    ]),
+    { headers: { "content-type": "application/json" } },
+  );
+
+
 const b2cResponse = () =>
   new Response(
     JSON.stringify({
@@ -127,6 +139,7 @@ describe("SMSA audit regression", () => {
 
   describe("ShortCode consignee-only restriction", () => {
     test("does not emit ShortCode on ShipperAddress", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       const input: CreateShipmentInput = {
@@ -160,6 +173,7 @@ describe("SMSA audit regression", () => {
 
   describe("serviceType is optional", () => {
     test("createShipment without a serviceType routes to B2C", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       const input: CreateShipmentInput = {
@@ -329,6 +343,7 @@ describe("SMSA audit regression", () => {
     });
 
     test("falls back to a valid Date when createDate is absent", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -375,6 +390,7 @@ describe("SMSA audit regression", () => {
     });
 
     test("B2C uses cod.currency over declaredValue.currency", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       const result = await adapter.createShipment(codCurrencyInput());
@@ -384,6 +400,7 @@ describe("SMSA audit regression", () => {
     });
 
     test("C2B uses cod.currency over declaredValue.currency", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       await adapter.createShipment({
@@ -395,6 +412,7 @@ describe("SMSA audit regression", () => {
     });
 
     test("disabled COD falls back to declaredValue.currency", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       const result = await adapter.createShipment({
@@ -413,6 +431,7 @@ describe("SMSA audit regression", () => {
 
   describe("weight rounding", () => {
     test("rounds totalWeight to 3 decimals", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       await adapter.createShipment({
@@ -514,6 +533,7 @@ describe("SMSA audit regression", () => {
 
   describe("ShipDate UTC+3 wall clock", () => {
     test("ShipDate rolls to the next day when Saudi wall clock has, near end-of-day UTC", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       // 23:30 UTC on the 7th is already 02:30 on the 8th in Saudi (UTC+3). SMSA
       // reads bare timestamps as UTC+3, so the ship date must be the 8th, not
       // the 7th that zero-offset UTC would have produced.
@@ -536,6 +556,7 @@ describe("SMSA audit regression", () => {
 
   describe("fabricated OrderNumber surfaced as reference", () => {
     test("returns the booked OrderNumber as Shipment.reference when no reference is supplied", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
       // baseInput() carries no reference — the adapter must fabricate one.

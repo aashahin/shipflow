@@ -29,6 +29,18 @@ import type { CreateShipmentInput, ShipmentStatus } from "../../src/core/types";
 const originalFetch = globalThis.fetch;
 const mockFetch = mock(async () => new Response());
 
+/** Mock response for the SA cities lookup consumed by booking-time city validation */
+const smsaCitiesLookup = () =>
+  new Response(
+    JSON.stringify([
+      { cityName: "Riyadh", cityCode: "RUH", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+      { cityName: "Jeddah", cityCode: "JED", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+      { cityName: "Dammam", cityCode: "DMM", countryCode: "SA", currencyCode: "SAR", currencyName: "Saudi Riyal" },
+    ]),
+    { headers: { "content-type": "application/json" } },
+  );
+
+
 describe("SMSAExpressAdapter", () => {
   let adapter: SMSAExpressAdapter;
 
@@ -119,6 +131,7 @@ describe("SMSAExpressAdapter", () => {
     };
 
     test("creates B2C shipment with COD successfully", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -148,6 +161,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("sends correct B2C request body", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -162,7 +176,7 @@ describe("SMSAExpressAdapter", () => {
 
       await adapter.createShipment(shipmentInput);
 
-      const [url, init] = mockFetch.mock.calls[0] as unknown as [
+      const [url, init] = mockFetch.mock.calls[1] as unknown as [
         string,
         RequestInit,
       ];
@@ -185,6 +199,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("creates shipment without COD (CODAmount = 0)", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -207,13 +222,14 @@ describe("SMSAExpressAdapter", () => {
       expect(result.codAmount).toBeUndefined();
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       expect(body.CODAmount).toBe(0);
     });
 
     test("converts lb weight to kg", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -234,7 +250,7 @@ describe("SMSAExpressAdapter", () => {
       await adapter.createShipment(lbInput);
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       // 10 lb ≈ 4.53592 kg
@@ -243,6 +259,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("maps national address ShortCode", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -266,13 +283,14 @@ describe("SMSAExpressAdapter", () => {
       await adapter.createShipment(shortCodeInput);
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       expect(body.ConsigneeAddress.ShortCode).toBe("RRRD2929");
     });
 
     test("handles API error responses", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -288,6 +306,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("handles authentication errors", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(JSON.stringify({ message: "Unauthorized" }), {
           status: 401,
@@ -301,6 +320,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("sets ZPL waybill type when requested", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -319,7 +339,7 @@ describe("SMSAExpressAdapter", () => {
       });
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       expect(body.WaybillType).toBe("ZPL");
@@ -362,6 +382,7 @@ describe("SMSAExpressAdapter", () => {
     };
 
     test("routes C2B service code to /api/c2b/new", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -376,13 +397,14 @@ describe("SMSAExpressAdapter", () => {
 
       const result = await adapter.createShipment(c2bInput);
 
-      const [url] = mockFetch.mock.calls[0] as unknown as [string];
+      const [url] = mockFetch.mock.calls[1] as unknown as [string];
       expect(url).toContain("/api/c2b/new");
       expect(result.trackingNumber).toBe("290000100001");
       expect(result.carrier).toBe("smsaexpress");
     });
 
     test("sends correct C2B request body", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -398,7 +420,7 @@ describe("SMSAExpressAdapter", () => {
       await adapter.createShipment(c2bInput);
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       // C2B uses PickupAddress and ReturnToAddress (not ConsigneeAddress/ShipperAddress)
@@ -1195,6 +1217,7 @@ describe("SMSAExpressAdapter", () => {
     };
 
     test("creates 2-way shipment via correct endpoint", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -1215,7 +1238,7 @@ describe("SMSAExpressAdapter", () => {
 
       const result = await adapter.create2WayShipment(twoWayInput);
 
-      const [url] = mockFetch.mock.calls[0] as unknown as [string];
+      const [url] = mockFetch.mock.calls[1] as unknown as [string];
       expect(url).toContain("/api/TwoWayShipment/new");
       expect(result.trackingNumber).toBe("290000200001");
       expect(result.carrier).toBe("smsaexpress");
@@ -1226,6 +1249,7 @@ describe("SMSAExpressAdapter", () => {
     });
 
     test("sends correct 2-way request body", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -1241,7 +1265,7 @@ describe("SMSAExpressAdapter", () => {
       await adapter.create2WayShipment(twoWayInput);
 
       const body = JSON.parse(
-        (mockFetch.mock.calls[0] as unknown as [string, RequestInit])[1]
+        (mockFetch.mock.calls[1] as unknown as [string, RequestInit])[1]
           .body as string,
       );
       expect(body.ConsigneeAddress.ContactName).toBe("SMSA Express JED");

@@ -624,16 +624,42 @@ describe("Aymakan audit regression", () => {
   // ==========================================================================
 
   describe("resolveCity contains-match guard (FIX #6)", () => {
-    test("a distinct longer city is not silently rerouted to a shorter candidate", async () => {
+    test("a distinct longer city is never silently rerouted to a shorter candidate", async () => {
       // Cities cache has "Riyadh" (and NOT "Riyadh Al Khabra"). The old step-5
       // reverse-direction match (input contains candidate name) rerouted
-      // "Riyadh Al Khabra" -> "Riyadh". It must now pass through unchanged.
+      // "Riyadh Al Khabra" -> "Riyadh". With strict booking-time validation it
+      // must now be rejected outright — a clear ValidationError, never a
+      // silent substitution and never an opaque carrier 400.
       mockFetch.mockResolvedValueOnce(citiesResponse());
+
+      const input = sampleInput();
+      const attempt = adapter.createShipment({
+        ...input,
+        consignee: { ...input.consignee, city: "Riyadh Al Khabra" },
+      });
+
+      await expect(attempt).rejects.toThrow(ValidationError);
+      await expect(attempt).rejects.toThrow('city "Riyadh Al Khabra"');
+      // Only the /cities lookup was called — no booking request went out.
+      const urls = mockFetch.mock.calls.map(
+        (c) => (c as unknown as [string])[0],
+      );
+      expect(urls.some((u) => u.includes("/shipping/create"))).toBe(false);
+    });
+
+    test("passes cities through verbatim when the /cities lookup is down", async () => {
+      // Strictness must never turn a carrier /cities outage into a booking
+      // outage: with no list available the adapter falls back to pass-through
+      // and lets the API decide. 404 is not retryable, so exactly one queued
+      // mock is consumed by the lookup.
+      mockFetch.mockResolvedValueOnce(
+        new Response("not found", { status: 404 }),
+      );
       mockFetch.mockResolvedValueOnce(
         json({
           success: true,
           shipping: {
-            tracking_number: "AY400",
+            tracking_number: "AY401",
             reference: null,
             status: "AY-0001",
             status_label: "AWB created at origin",
@@ -659,7 +685,6 @@ describe("Aymakan audit regression", () => {
       const [, init] = lastCall();
       const body = JSON.parse(init.body as string);
       expect(body.delivery_city).toBe("Riyadh Al Khabra");
-      expect(body.delivery_city).not.toBe("Riyadh");
     });
   });
 

@@ -4,6 +4,11 @@
  * Full implementation of the CarrierAdapter interface for Aymakan API.
  */
 
+import {
+  CITIES_CACHE_TTL,
+  CITIES_FAILURE_COOLDOWN,
+  findCityMatch,
+} from "../../core/city-resolver";
 import { APIError, ValidationError } from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import {
@@ -149,14 +154,6 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   private citiesCacheTime = 0;
   /** Timestamp of the last failed /cities fetch attempt, if any */
   private citiesFetchFailedAt = 0;
-  /** Cache TTL: 1 hour */
-  private static readonly CITIES_CACHE_TTL = 60 * 60 * 1000;
-  /**
-   * After a failed /cities fetch, back off for this long before retrying so a
-   * carrier outage doesn't force every shipment/pickup call to re-attempt the
-   * multi-retry /cities request.
-   */
-  private static readonly CITIES_FAILURE_COOLDOWN = 60 * 1000;
 
   constructor(config: AymakanConfig) {
     super(config);
@@ -187,14 +184,14 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     const now = Date.now();
     if (
       this.citiesCache &&
-      now - this.citiesCacheTime < AymakanAdapter.CITIES_CACHE_TTL
+      now - this.citiesCacheTime < CITIES_CACHE_TTL
     ) {
       return;
     }
     // A recent failure is still in its cooldown window — skip re-attempting
     // the /cities fetch and fall back to whatever cache we have (possibly
     // empty), so an outage never hard-blocks shipment/pickup creation.
-    if (now - this.citiesFetchFailedAt < AymakanAdapter.CITIES_FAILURE_COOLDOWN) {
+    if (now - this.citiesFetchFailedAt < CITIES_FAILURE_COOLDOWN) {
       if (!this.citiesCache) this.citiesCache = [];
       return;
     }
@@ -208,90 +205,45 @@ export class AymakanAdapter extends BaseCarrierAdapter {
   }
 
   /**
-   * Normalize Arabic text for comparison:
-   * - Strip diacritics (tashkeel)
-   * - Normalize alef variants (أ إ آ → ا)
-   * - Normalize taa marbuta (ة → ه)
-   * - Trim whitespace
-   */
-  private static normalizeArabic(text: string): string {
-    return text
-      .trim()
-      .replace(/[\u064B-\u065F\u0670]/g, "") // strip tashkeel
-      .replace(/[أإآ]/g, "ا") // normalize alef
-      .replace(/ة/g, "ه"); // normalize taa marbuta
-  }
-
-  /**
-   * Resolve a user-input city name to the valid Aymakan English city name.
-   *
-   * Matching strategy (first match wins):
-   * 1. Exact match on English name (case-insensitive)
-   * 2. Exact match on Arabic name
-   * 3. Normalized Arabic match (handles tashkeel, alef variants, taa marbuta)
-   * 4. Match after stripping "ال" prefix from Arabic input
-   * 5. Candidate-contains-input match on English name (candidate name contains
-   *    the input, e.g. "Riyadh" -> "Riyadh City"; requires input length >= 3).
-   *    The reverse direction is intentionally excluded so a distinct longer
-   *    city like "Riyadh Al Khabra" is never rerouted to "Riyadh".
-   *
-   * Falls back to the original input if no match is found.
+   * Resolve a user-input city name to the valid Aymakan English city name via
+   * the shared matcher (see core/city-resolver.ts for the strategy). Lenient:
+   * falls back to the original input when nothing matches or the cities list
+   * is unavailable — used for pickups, where an invalid city only affects the
+   * merchant's own pickup request.
    */
   private resolveCity(inputCity: string): string {
     if (!this.citiesCache || this.citiesCache.length === 0) return inputCity;
-
     const trimmed = inputCity.trim();
     if (!trimmed) return inputCity;
-    const lower = trimmed.toLowerCase();
-
-    // 1. Exact English match (case-insensitive)
-    const exactEn = this.citiesCache.find(
-      (c) => c.nameEn.toLowerCase() === lower,
-    );
-    if (exactEn) return exactEn.nameEn;
-
-    // 2. Exact Arabic match
-    const exactAr = this.citiesCache.find((c) => c.nameAr === trimmed);
-    if (exactAr) return exactAr.nameEn;
-
-    // 3. Normalized Arabic match
-    const normalizedInput = AymakanAdapter.normalizeArabic(trimmed);
-    const normalizedAr = this.citiesCache.find(
-      (c) =>
-        c.nameAr &&
-        AymakanAdapter.normalizeArabic(c.nameAr) === normalizedInput,
-    );
-    if (normalizedAr) return normalizedAr.nameEn;
-
-    // 4. Arabic without "ال" prefix
-    const withoutAl = normalizedInput.startsWith("ال")
-      ? normalizedInput.slice(2)
-      : `ال${normalizedInput}`;
-    const alMatch = this.citiesCache.find(
-      (c) => c.nameAr && AymakanAdapter.normalizeArabic(c.nameAr) === withoutAl,
-    );
-    if (alMatch) return alMatch.nameEn;
-
-    // 5. Candidate-contains-input match on English name (e.g. input "Riyadh"
-    //    resolves to the canonical "Riyadh City"). We deliberately match ONLY
-    //    this direction. The reverse direction (input contains a candidate's
-    //    name) is excluded because a longer, distinct city such as
-    //    "Riyadh Al Khabra" would otherwise be silently rerouted to "Riyadh".
-    //    Guarded by a minimum input length so very short inputs (1-2 chars)
-    //    don't spuriously substring-match many candidates.
-    if (lower.length >= 3) {
-      const containsEn = this.citiesCache.find((c) =>
-        c.nameEn.toLowerCase().includes(lower),
-      );
-      if (containsEn) return containsEn.nameEn;
-    }
-
-    // No match — return as-is and let the API return a validation error
-    return trimmed;
+    return findCityMatch(trimmed, this.citiesCache)?.nameEn ?? trimmed;
   }
 
   /**
-   * Resolve city names in a CreateShipmentInput to valid Aymakan city names.
+   * Strict variant used for shipment creation: when Aymakan's own city list is
+   * loaded and the input matches nothing in it, the booking would be rejected
+   * by the API anyway — fail fast with a clear, field-scoped error instead of
+   * an opaque carrier 400. When the list is unavailable (fetch failed /
+   * cooldown), fall back to pass-through so a /cities outage never blocks
+   * shipment creation.
+   */
+  private resolveCityStrict(
+    inputCity: string,
+    field: "shipper.city" | "consignee.city",
+  ): string {
+    if (!this.citiesCache || this.citiesCache.length === 0) return inputCity;
+    const match = findCityMatch(inputCity, this.citiesCache);
+    if (!match) {
+      throw new ValidationError(
+        `Unknown ${field.replace(".city", "")} city "${inputCity}": not in Aymakan's supported city list`,
+        { field },
+      );
+    }
+    return match.nameEn;
+  }
+
+  /**
+   * Resolve city names in a CreateShipmentInput to valid Aymakan city names,
+   * rejecting cities Aymakan does not serve (strict — see resolveCityStrict).
    */
   private resolveCitiesInInput(
     input: CreateShipmentInput,
@@ -300,11 +252,11 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       ...input,
       shipper: {
         ...input.shipper,
-        city: this.resolveCity(input.shipper.city),
+        city: this.resolveCityStrict(input.shipper.city, "shipper.city"),
       },
       consignee: {
         ...input.consignee,
-        city: this.resolveCity(input.consignee.city),
+        city: this.resolveCityStrict(input.consignee.city, "consignee.city"),
       },
     };
   }
