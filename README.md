@@ -9,6 +9,7 @@ Think EasyPost / Shippo, but purpose-built for Saudi Arabia and the GCC.
 - **Unified types** — one `CreateShipmentInput`, one `TrackingResult`, one `WebhookEvent`, regardless of carrier
 - **Tree-shakeable** — only the carriers you import are bundled
 - **Auto-validation** — Valibot schemas validate every `createShipment()` call before it hits the network
+- **Booking-time city validation (KSA)** — Saudi shipper/consignee cities are checked against the carrier's own city list before booking; typos fail fast with a field-scoped `ValidationError` instead of an opaque carrier rejection
 - **Webhook parsing** — normalize incoming carrier webhooks into a single event format
 - **Smart retries** — dependency-free retry with jittered backoff that honors carrier `Retry-After` on 429/503, surfacing a `RateLimitError` when the wait is too long to absorb inline
 - **Minimal dependencies** — only [Valibot](https://github.com/fabian-hiller/valibot) for validation; uses the runtime's global `fetch` (Node 20+, Deno, Bun, edge/workers), no axios/node-fetch
@@ -352,6 +353,27 @@ import {
   PickupRequestSchema,
 } from "shipflow";
 ```
+
+### Booking-time city validation (KSA)
+
+On `createShipment()` (including bulk and SMSA 2-way), Aymakan and SMSA
+validate Saudi (`countryCode: "SA"`) shipper/consignee cities against the
+carrier's **own** city list, fetched once and cached for an hour:
+
+- A city that resolves (exact/fuzzy, Arabic or English — diacritics, hamza
+  variants and the `ال` article are normalized) is rewritten to the carrier's
+  canonical English name before booking.
+- A city the carrier does not serve throws a `ValidationError` with
+  `field: "shipper.city"` or `field: "consignee.city"` **before** any booking
+  request is sent — the same booking would otherwise be rejected server-side
+  with an opaque carrier error.
+- Matching never silently reroutes a distinct longer name to a shorter one
+  (e.g. `"Riyadh Al Khabra"` is never rewritten to `"Riyadh"`).
+- If the carrier's city lookup is down, validation degrades to pass-through so
+  a lookup outage never blocks bookings; non-SA addresses are not validated.
+
+Pickups intentionally stay lenient (an invalid pickup city only affects the
+merchant's own pickup request).
 
 ## Error Handling
 
