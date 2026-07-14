@@ -686,6 +686,45 @@ describe("Aymakan audit regression", () => {
       const body = JSON.parse(init.body as string);
       expect(body.delivery_city).toBe("Riyadh Al Khabra");
     });
+
+    test("a supported non-SA (GCC) consignee city bypasses the Saudi city list", async () => {
+      // Aymakan serves other GCC countries whose cities are NOT in its Saudi
+      // gazetteer (see supportedCountries). Strict validation is Saudi-only —
+      // a non-SA consignee must pass through, mirroring the SMSA adapter, so an
+      // e.g. AE "Dubai" booking is not rejected client-side while the cache is
+      // loaded.
+      mockFetch.mockResolvedValueOnce(citiesResponse());
+      mockFetch.mockResolvedValueOnce(
+        json({
+          success: true,
+          shipping: {
+            tracking_number: "AY-AE",
+            reference: null,
+            status: "AY-0001",
+            status_label: "AWB created at origin",
+            cod_amount: null,
+            declared_value: 1,
+            currency: "SAR",
+            created_at: "2026-01-22T10:00:00.000000Z",
+            weight: 1,
+            pieces: 1,
+            is_reverse_pickup: 0,
+            label: "",
+            pdf_label: "",
+          },
+        }),
+      );
+
+      const input = sampleInput();
+      await adapter.createShipment({
+        ...input,
+        consignee: { ...input.consignee, city: "Dubai", countryCode: "AE" },
+      });
+
+      const [, init] = lastCall();
+      const body = JSON.parse(init.body as string);
+      expect(body.delivery_city).toBe("Dubai");
+    });
   });
 
   // ==========================================================================

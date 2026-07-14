@@ -225,16 +225,22 @@ export class AymakanAdapter extends BaseCarrierAdapter {
    * an opaque carrier 400. When the list is unavailable (fetch failed /
    * cooldown), fall back to pass-through so a /cities outage never blocks
    * shipment creation.
+   *
+   * Strict validation is Saudi-only: Aymakan's city list is the Saudi
+   * gazetteer, but Aymakan also serves other GCC countries (see
+   * supportedCountries), so a non-SA address passes through untouched —
+   * mirroring the SMSA adapter.
    */
   private resolveCityStrict(
-    inputCity: string,
+    address: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
     field: "shipper.city" | "consignee.city",
   ): string {
-    if (!this.citiesCache || this.citiesCache.length === 0) return inputCity;
-    const match = findCityMatch(inputCity, this.citiesCache);
+    if (address.countryCode !== "SA") return address.city;
+    if (!this.citiesCache || this.citiesCache.length === 0) return address.city;
+    const match = findCityMatch(address.city, this.citiesCache);
     if (!match) {
       throw new ValidationError(
-        `Unknown ${field.replace(".city", "")} city "${inputCity}": not in Aymakan's supported city list`,
+        `Unknown ${field.replace(".city", "")} city "${address.city}": not in Aymakan's supported city list`,
         { field },
       );
     }
@@ -243,7 +249,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
   /**
    * Resolve city names in a CreateShipmentInput to valid Aymakan city names,
-   * rejecting cities Aymakan does not serve (strict — see resolveCityStrict).
+   * rejecting SA cities Aymakan does not serve (strict — see resolveCityStrict).
    */
   private resolveCitiesInInput(
     input: CreateShipmentInput,
@@ -252,11 +258,11 @@ export class AymakanAdapter extends BaseCarrierAdapter {
       ...input,
       shipper: {
         ...input.shipper,
-        city: this.resolveCityStrict(input.shipper.city, "shipper.city"),
+        city: this.resolveCityStrict(input.shipper, "shipper.city"),
       },
       consignee: {
         ...input.consignee,
-        city: this.resolveCityStrict(input.consignee.city, "consignee.city"),
+        city: this.resolveCityStrict(input.consignee, "consignee.city"),
       },
     };
   }

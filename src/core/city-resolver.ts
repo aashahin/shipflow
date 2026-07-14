@@ -87,12 +87,18 @@ export function findCityMatch(inputCity: string, cities: City[]): City | null {
   //    name) is excluded because a longer, distinct city such as
   //    "Riyadh Al Khabra" would otherwise be silently rerouted to "Riyadh".
   //    Guarded by a minimum input length so very short inputs (1-2 chars)
-  //    don't spuriously substring-match many candidates.
+  //    don't spuriously substring-match many candidates. Requires a UNIQUE
+  //    containing candidate: if the input is a substring of several distinct
+  //    cities (e.g. "Dhahran" ⊂ both "Dhahran" and "Dhahran Al Janub"), the
+  //    match is ambiguous and we return null rather than silently pick the
+  //    first by list order — the caller then rejects (strict) or passes the
+  //    original through (lenient).
   if (lower.length >= 3) {
-    const containsEn = cities.find((c) =>
+    const containing = cities.filter((c) =>
       c.nameEn.toLowerCase().includes(lower),
     );
-    if (containsEn) return containsEn;
+    const [only] = containing;
+    if (only && containing.length === 1) return only;
   }
 
   return null;

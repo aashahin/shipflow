@@ -56,6 +56,16 @@ describe("findCityMatch", () => {
     expect(findCityMatch("Riyadh Al Khabra", CITIES)).toBeNull();
   });
 
+  test("returns null when the input is a substring of several distinct cities", () => {
+    const ambiguous: City[] = [
+      { nameEn: "Dhahran Al Janub", nameAr: "ظهران الجنوب" },
+      { nameEn: "Dhahran Heights", nameAr: "مرتفعات الظهران" },
+    ];
+    // "Dhahran" is contained by both and equals neither — resolving it would be
+    // a list-order guess, so the matcher rejects rather than reroute silently.
+    expect(findCityMatch("Dhahran", ambiguous)).toBeNull();
+  });
+
   test("requires at least 3 chars for the contains match", () => {
     expect(findCityMatch("Kh", CITIES)).toBeNull();
   });
