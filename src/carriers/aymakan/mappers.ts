@@ -114,12 +114,17 @@ const VALID_AYMAKAN_SERVICE_TYPES = new Set(
 
 /**
  * Resolve service type to a valid Aymakan code.
- * Returns undefined for unknown values so the API uses its default (ONP/ecommerce).
+ * Empty/undefined is allowed (API uses its default ONP/ecommerce). A non-empty
+ * unknown value is rejected so we fail fast instead of silently dropping a
+ * misconfigured merchant service type.
  */
 function resolveServiceType(serviceType?: string): string | undefined {
   if (!serviceType) return undefined;
   if (VALID_AYMAKAN_SERVICE_TYPES.has(serviceType)) return serviceType;
-  return undefined;
+  throw new ValidationError(
+    `Invalid Aymakan service type: "${serviceType}". Expected one of: ${[...VALID_AYMAKAN_SERVICE_TYPES].join(", ")}`,
+    { field: "serviceType" },
+  );
 }
 
 export function mapCreateShipmentRequest(

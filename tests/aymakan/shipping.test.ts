@@ -14,7 +14,8 @@ import {
   test,
 } from "bun:test";
 import { AymakanAdapter, AymakanService } from "../../src/carriers/aymakan";
-import { APIError, AuthenticationError } from "../../src/core/errors";
+import { mapCreateShipmentRequest } from "../../src/carriers/aymakan/mappers";
+import { APIError, AuthenticationError, ValidationError } from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -183,6 +184,23 @@ describe("AymakanAdapter", () => {
       const body = JSON.parse(createCall[1]?.body as string);
       expect(body.collection_city).toBe("Riyadh");
       expect(body.delivery_city).toBe("Jeddah");
+    });
+
+    test("unknown serviceType is rejected before the request is built", () => {
+      expect(() =>
+        mapCreateShipmentRequest({
+          ...shipmentInput,
+          serviceType: "NOT_A_REAL_SERVICE",
+        }),
+      ).toThrow(ValidationError);
+    });
+
+    test("omitted serviceType leaves service_type undefined so Aymakan applies its default", () => {
+      const req = mapCreateShipmentRequest({
+        ...shipmentInput,
+        serviceType: undefined,
+      });
+      expect(req.service_type).toBeUndefined();
     });
 
     test("handles validation errors", async () => {
