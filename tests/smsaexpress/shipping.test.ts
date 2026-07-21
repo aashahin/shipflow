@@ -158,6 +158,31 @@ describe("SMSAExpressAdapter", () => {
       expect(result.declaredValue).toBe(100);
       expect(result.currency).toBe("SAR");
       expect(result.reference).toBe("TEST-ORDER-001");
+      // The inline waybill PDF from the create response is exposed as
+      // pdfLabelUrl so callers can persist it without a getLabel round-trip.
+      expect(result.pdfLabelUrl).toBe(
+        "data:application/pdf;base64,JVBERi0xLjQK...",
+      );
+    });
+
+    test("omits pdfLabelUrl when the waybill carries no awbFile", async () => {
+      mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            sawb: "290000000000",
+            createDate: "2026-04-02T10:00:00",
+            shipmentParcelsCount: 1,
+            waybills: [{ awb: "290000000001" }],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const result = await adapter.createShipment(shipmentInput);
+
+      expect(result.trackingNumber).toBe("290000000001");
+      expect(result.pdfLabelUrl).toBeUndefined();
     });
 
     test("sends correct B2C request body", async () => {

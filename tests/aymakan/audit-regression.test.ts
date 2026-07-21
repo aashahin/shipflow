@@ -19,6 +19,7 @@ import {
 import { AymakanAdapter } from "../../src/carriers/aymakan";
 import {
   APIError,
+  MalformedResponseError,
   ValidationError,
   WebhookVerificationError,
 } from "../../src/core/errors";
@@ -560,27 +561,41 @@ describe("Aymakan audit regression", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    test("createBulkShipments throws a clean APIError when shipments array is missing", async () => {
+    test("createBulkShipments throws MalformedResponseError when shipments array is missing", async () => {
       mockFetch.mockResolvedValueOnce(citiesResponse());
       mockFetch.mockResolvedValueOnce(json({ success: true }));
 
       await expect(
         adapter.createBulkShipments([sampleInput()]),
-      ).rejects.toThrow(APIError);
+      ).rejects.toThrow(MalformedResponseError);
     });
 
-    test("trackMultiple throws a clean APIError when data.shipments is missing", async () => {
+    test("trackMultiple throws MalformedResponseError (statusCode 502, still an APIError) when data.shipments is missing", async () => {
       mockFetch.mockResolvedValueOnce(json({ success: true, data: {} }));
 
-      await expect(adapter.trackMultiple(["AY1"])).rejects.toThrow(APIError);
+      // A success-shaped body missing its required structure is a carrier
+      // FAULT: it must remain catchable as APIError (compat) but carry a 5xx
+      // statusCode so breaker error-filters count it toward the failure
+      // budget, unlike statusCode-less logical rejections.
+      const error = await adapter.trackMultiple(["AY1"]).then(
+        () => {
+          throw new Error("expected trackMultiple to reject");
+        },
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(MalformedResponseError);
+      expect(error).toBeInstanceOf(APIError);
+      expect((error as MalformedResponseError).statusCode).toBe(502);
     });
 
-    test("getPickupRequests throws a clean APIError when nested data is missing", async () => {
+    test("getPickupRequests throws MalformedResponseError when nested data is missing", async () => {
       mockFetch.mockResolvedValueOnce(
         json({ success: true, data: { pickupRequests: {} } }),
       );
 
-      await expect(adapter.getPickupRequests()).rejects.toThrow(APIError);
+      await expect(adapter.getPickupRequests()).rejects.toThrow(
+        MalformedResponseError,
+      );
     });
   });
 

@@ -9,7 +9,11 @@ import {
   CITIES_FAILURE_COOLDOWN,
   findCityMatch,
 } from "../../core/city-resolver";
-import { APIError, ValidationError } from "../../core/errors";
+import {
+  APIError,
+  MalformedResponseError,
+  ValidationError,
+} from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import {
   validateCreateShipmentInput,
@@ -327,7 +331,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     }
 
     if (!Array.isArray(response.shipments)) {
-      throw new APIError(
+      throw new MalformedResponseError(
         "Aymakan bulk create response is missing the shipments array",
         { carrier: "aymakan", raw: response },
       );
@@ -413,7 +417,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     }
 
     if (!Array.isArray(response.data?.shipments)) {
-      throw new APIError("Aymakan track response is missing data.shipments", {
+      throw new MalformedResponseError("Aymakan track response is missing data.shipments", {
         carrier: "aymakan",
         raw: response,
       });
@@ -579,7 +583,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
 
     const list = response.data?.pickupRequests?.data;
     if (!Array.isArray(list)) {
-      throw new APIError(
+      throw new MalformedResponseError(
         "Aymakan pickup list response is missing data.pickupRequests.data",
         { carrier: "aymakan", raw: response },
       );
@@ -702,7 +706,7 @@ export class AymakanAdapter extends BaseCarrierAdapter {
     }
 
     if (!Array.isArray(response.data?.address)) {
-      throw new APIError(
+      throw new MalformedResponseError(
         "Aymakan address list response is missing data.address",
         { carrier: "aymakan", raw: response },
       );

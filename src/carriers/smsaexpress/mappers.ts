@@ -6,6 +6,7 @@
 
 import {
   APIError,
+  MalformedResponseError,
   ValidationError,
   WebhookVerificationError,
 } from "../../core/errors";
@@ -254,7 +255,7 @@ export function mapShipmentResponse(
   const trackingNumber = firstWaybill?.awb ?? data.sawb;
 
   if (!trackingNumber) {
-    throw new APIError("No tracking number in shipment response", {
+    throw new MalformedResponseError("No tracking number in shipment response", {
       carrier: "smsaexpress",
       raw: data,
     });
@@ -275,6 +276,13 @@ export function mapShipmentResponse(
       input.declaredValue?.currency ??
       input.cod?.currency ??
       "SAR",
+    // SMSA delivers the waybill PDF inline on the create response. Expose it
+    // as pdfLabelUrl so callers can persist the label immediately instead of
+    // a follow-up getLabel round-trip (the b2c/c2b query endpoints may not
+    // even have indexed a freshly-created AWB yet).
+    pdfLabelUrl: firstWaybill?.awbFile
+      ? `data:application/pdf;base64,${firstWaybill.awbFile}`
+      : undefined,
     returnLabel: firstWaybill?.returnBarcode
       ? `data:application/pdf;base64,${firstWaybill.returnBarcode}`
       : undefined,

@@ -57,6 +57,7 @@ export type {
 export {
   APIError,
   AuthenticationError,
+  MalformedResponseError,
   NetworkError,
   RateLimitError,
   ShipFlowError,

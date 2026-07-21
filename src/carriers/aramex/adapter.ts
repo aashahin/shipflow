@@ -14,6 +14,7 @@
 
 import {
   APIError,
+  MalformedResponseError,
   UnsupportedOperationError,
   ValidationError,
 } from "../../core/errors";
@@ -253,7 +254,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
 
     const processed = response.Shipments?.[0];
     if (!processed) {
-      throw new APIError("Aramex returned no shipment", {
+      throw new MalformedResponseError("Aramex returned no shipment", {
         carrier: "aramex",
         raw: response,
       });
@@ -319,7 +320,7 @@ export class AramexAdapter extends BaseCarrierAdapter {
 
     const processed = response.Shipments ?? [];
     if (processed.length === 0) {
-      throw new APIError("Aramex returned no shipments", {
+      throw new MalformedResponseError("Aramex returned no shipments", {
         carrier: "aramex",
         raw: response,
       });

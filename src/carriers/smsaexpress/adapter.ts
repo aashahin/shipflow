@@ -9,7 +9,12 @@ import {
   CITIES_FAILURE_COOLDOWN,
   findCityMatch,
 } from "../../core/city-resolver";
-import { APIError, RateLimitError, ValidationError } from "../../core/errors";
+import {
+  APIError,
+  MalformedResponseError,
+  RateLimitError,
+  ValidationError,
+} from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import type {
   CarrierConfig,
@@ -360,7 +365,7 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     // HTTP 200) would otherwise throw an opaque "response.map is not a function"
     // far from the cause.
     if (!Array.isArray(response)) {
-      throw new APIError("SMSA cities lookup returned an unexpected shape", {
+      throw new MalformedResponseError("SMSA cities lookup returned an unexpected shape", {
         carrier: "smsaexpress",
         raw: response,
       });
@@ -375,7 +380,7 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     );
 
     if (!Array.isArray(response)) {
-      throw new APIError("SMSA offices lookup returned an unexpected shape", {
+      throw new MalformedResponseError("SMSA offices lookup returned an unexpected shape", {
         carrier: "smsaexpress",
         raw: response,
       });

@@ -78,6 +78,32 @@ export class RateLimitError extends APIError {
   }
 }
 
+/**
+ * The carrier answered with a success-shaped response whose body is missing
+ * the structure the operation requires (e.g. HTTP-200 maintenance/degraded
+ * payloads served behind a CDN during an incident). Distinct from a logical
+ * carrier rejection: this is a carrier FAULT, not a caller-input outcome.
+ *
+ * Extends APIError with a default statusCode of 502 so existing
+ * `instanceof APIError` handling keeps working, while circuit-breaker error
+ * filters that treat statusCode-less APIErrors as expected logical
+ * rejections still count these toward the failure budget.
+ */
+export class MalformedResponseError extends APIError {
+  constructor(
+    message: string,
+    options?: {
+      carrier?: string;
+      code?: string;
+      statusCode?: number;
+      raw?: unknown;
+    }
+  ) {
+    super(message, { ...options, statusCode: options?.statusCode ?? 502 });
+    this.name = 'MalformedResponseError';
+  }
+}
+
 /** Validation failed before sending request (Valibot parse failure) */
 export class ValidationError extends ShipFlowError {
   readonly field?: string;
