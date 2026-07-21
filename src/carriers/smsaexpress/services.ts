@@ -1,15 +1,31 @@
 // file: src/carriers/smsaexpress/services.ts
 /**
- * SMSA Express Service Type Codes
- * Use these constants for type-safe service selection.
+ * SMSA Express Service Type Codes (sample / common values).
+ *
+ * Official B2C docs mark `ServiceCode` as **optional** and say codes come from
+ * the Service Types lookup (`GET /api/Lookup/ServiceTypes`). Codes are
+ * **account-contract specific** — the sample EDDL is not valid on every key.
+ *
+ * Recommendation:
+ * - B2C create: omit `serviceType` so ServiceCode is not sent (account default).
+ * - C2B reverse pickup: use {@link SMSAService.C2B_REVERSE} (`EDCR`).
+ * - Explicit product: call `adapter.getServiceTypes()` and pick a code from the
+ *   list your API key returns.
  */
 
 export const SMSAService = {
-  /** E-commerce delivery */
+  /**
+   * Sample e-commerce delivery code from SMSA docs.
+   * @deprecated Prefer omitting serviceType on B2C, or use a code from
+   * `getServiceTypes()` for your account — EDDL is frequently rejected.
+   */
   ECOMMERCE_DELIVERY: "EDDL",
-  /** Express delivery */
+  /**
+   * Sample express delivery code.
+   * @deprecated Prefer a code from `getServiceTypes()` for your account.
+   */
   EXPRESS_DELIVERY: "EDEL",
-  /** C2B / Reverse pickup */
+  /** C2B / Reverse pickup (routes to `/api/c2b/new`) */
   C2B_REVERSE: "EDCR",
 } as const;
 

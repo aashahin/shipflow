@@ -172,7 +172,7 @@ describe("SMSA audit regression", () => {
   });
 
   describe("serviceType is optional", () => {
-    test("createShipment without a serviceType routes to B2C", async () => {
+    test("createShipment without a serviceType routes to B2C and omits ServiceCode", async () => {
       mockFetch.mockResolvedValueOnce(smsaCitiesLookup());
       mockFetch.mockResolvedValueOnce(b2cResponse());
 
@@ -192,15 +192,21 @@ describe("SMSA audit regression", () => {
           countryCode: "SA",
         },
         parcels: [{ weight: { value: 1, unit: "kg" }, pieces: 1 }],
-        // no serviceType
+        // no serviceType — ServiceCode is optional per SMSA docs
       };
 
       const result = await adapter.createShipment(input);
 
       const calls = mockFetch.mock.calls;
-      const [url] = calls[calls.length - 1] as unknown as [string, RequestInit];
+      const [url, init] = calls[calls.length - 1] as unknown as [
+        string,
+        RequestInit,
+      ];
       expect(url).toContain("/api/shipment/b2c/new");
       expect(result.trackingNumber).toBe("290000000001");
+      const body = JSON.parse(init.body as string);
+      // Do not invent EDDL — account-default product applies when omitted.
+      expect(body.ServiceCode).toBeUndefined();
     });
   });
 

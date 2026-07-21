@@ -45,6 +45,7 @@ import type {
   SMSAPushIdDetailsRequest,
   SMSAPushIdDetailsResponse,
   SMSASendInvoiceRequest,
+  SMSAServiceTypeLookupItem,
   SMSAShipmentResponse,
   SMSAShortAddressResponse,
   SMSATrackingResponse,
@@ -387,6 +388,57 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
     }
 
     return response.map(mapOffice);
+  }
+
+  /**
+   * Account-enabled service products for this API key.
+   *
+   * SMSA's create docs mark `ServiceCode` optional and point at this lookup for
+   * the codes your contract supports. Hardcoding sample values like EDDL is
+   * unsafe — many accounts reject them with "Wrong service code".
+   *
+   * Prefer omitting ServiceCode on B2C create (account default) unless you have
+   * confirmed a code from this list (or need EDCR for C2B reverse pickup).
+   */
+  async getServiceTypes(): Promise<SMSAServiceTypeLookupItem[]> {
+    const response = await this.http.get<unknown>("/api/Lookup/ServiceTypes");
+
+    if (!Array.isArray(response)) {
+      throw new MalformedResponseError(
+        "SMSA service-types lookup returned an unexpected shape",
+        { carrier: "smsaexpress", raw: response },
+      );
+    }
+
+    return response
+      .map((item): SMSAServiceTypeLookupItem | null => {
+        if (typeof item === "string" && item.trim()) {
+          return { code: item.trim(), raw: item };
+        }
+        if (!item || typeof item !== "object") return null;
+        const row = item as Record<string, unknown>;
+        const codeRaw =
+          row.Code ??
+          row.code ??
+          row.ServiceCode ??
+          row.serviceCode ??
+          row.ServiceType ??
+          row.serviceType;
+        if (typeof codeRaw !== "string" || !codeRaw.trim()) return null;
+        const nameRaw =
+          row.Name ??
+          row.name ??
+          row.ServiceName ??
+          row.serviceName ??
+          row.Description ??
+          row.description;
+        return {
+          code: codeRaw.trim(),
+          name: typeof nameRaw === "string" ? nameRaw : undefined,
+          raw: item,
+        };
+      })
+      .filter((x): x is SMSAServiceTypeLookupItem => x !== null);
   }
 
   // =========================================================================

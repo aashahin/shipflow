@@ -173,6 +173,11 @@ export function mapCreateB2CRequest(
     consigneeAddress.ConsigneeID = input.options.metadata.consigneeId as string;
   }
 
+  // ServiceCode is OPTIONAL on B2C create (SMSA docs). Account-enabled codes
+  // come from GET /api/Lookup/ServiceTypes and vary by contract — do not invent
+  // EDDL/EDEL. Only include the field when the caller supplied a code.
+  const serviceCode = input.serviceType?.trim();
+
   return {
     ConsigneeAddress: consigneeAddress,
     ShipperAddress: mapAddress(input.shipper),
@@ -194,7 +199,7 @@ export function mapCreateB2CRequest(
     Weight: roundWeight(totalWeight),
     WeightUnit: "KG",
     WaybillType: input.labelFormat === "ZPL" ? "ZPL" : "PDF",
-    ServiceCode: input.serviceType,
+    ...(serviceCode ? { ServiceCode: serviceCode } : {}),
     SMSARetailID: (input.options?.metadata?.smsaRetailId as string) ?? "0",
     VatPaid: (input.options?.metadata?.vatPaid as boolean) ?? true,
     DutyPaid: (input.options?.metadata?.dutyPaid as boolean) ?? false,

@@ -46,7 +46,7 @@ Content-Type: application/json
 | DutyPaid           | Boolean                 | O         | false                     |                                                    |
 | OrderNumber        | String                  | M         | order221-212              |                                                    |
 | Parcels            | Int                     | M         | 1                         | Count of boxes per shipment                        |
-| ServiceCode        | String                  | O         | EDDL                      | List of SMSA Service Types available via lookup    |
+| ServiceCode        | String                  | O         | EDDL                      | **Optional.** Account-specific codes via `GET /api/Lookup/ServiceTypes`. Sample `EDDL` is not valid on every contract — omit the field to use the account default. |
 | ShipDate           | DateTime                | M         | 2021-01-01T08:00:00       |                                                    |
 | ShipmentCurrency   | String                  | M         | SAR                       | Declared Value Currency (ISO Code)                 |
 | ShipperAddress     | ShipmentAddress Object  | M         |                           |                                                    |

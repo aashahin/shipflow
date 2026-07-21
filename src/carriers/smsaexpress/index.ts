@@ -25,6 +25,7 @@ export type {
   SMSAPushIdDetailsRequest,
   SMSAPushIdDetailsResponse,
   SMSASendInvoiceRequest,
+  SMSAServiceTypeLookupItem,
   SMSAShipmentResponse,
   SMSAShortAddressResponse,
   SMSATrackingResponse,

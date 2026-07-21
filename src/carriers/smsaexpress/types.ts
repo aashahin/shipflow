@@ -178,6 +178,19 @@ export interface SMSAOfficeLookupItem {
   weekendShift: string;
 }
 
+/**
+ * Item from GET /api/Lookup/ServiceTypes.
+ * Shape varies slightly by environment; the adapter normalises common fields.
+ * Codes are **account-contract specific** — do not hardcode EDDL/EDEL.
+ */
+export interface SMSAServiceTypeLookupItem {
+  /** Product code used as ServiceCode on create (e.g. EDDL, EDCR, or custom). */
+  code: string;
+  /** Human-readable name when the API provides one. */
+  name?: string;
+  raw: unknown;
+}
+
 export interface SMSAShortAddressResponse {
   address1: string;
   address2: string;
