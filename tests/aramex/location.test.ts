@@ -13,6 +13,7 @@ import {
   test,
 } from "bun:test";
 import { AramexAdapter } from "../../src/carriers/aramex";
+import { AuthenticationError } from "../../src/core/errors";
 
 const originalFetch = globalThis.fetch;
 const mockFetch = mock(async () => new Response());
@@ -81,6 +82,25 @@ describe("AramexAdapter — location", () => {
 
     const [, init] = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string).CountryCode).toBe("AE");
+  });
+
+  test("getCities surfaces Aramex ERR75 as AuthenticationError", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json({
+        HasErrors: true,
+        Notifications: [
+          {
+            Code: "ERR75",
+            Message: "ClientInfo - Failed to login using Portal Service",
+          },
+        ],
+        Cities: [],
+      }),
+    );
+
+    await expect(adapter.getCities()).rejects.toBeInstanceOf(
+      AuthenticationError,
+    );
   });
 
   test("getDropoffLocations maps offices to Location", async () => {

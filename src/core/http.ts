@@ -72,6 +72,8 @@ export interface RequestOptions {
     errors?: Record<string, string[]>;
     /** Carrier signalled throttling inside an otherwise-OK response. */
     rateLimited?: boolean;
+    /** Carrier rejected credentials inside an otherwise-OK response. */
+    authenticationFailed?: boolean;
     /** Suggested wait (ms) if the carrier provided one in-band. */
     retryAfterMs?: number;
   };
@@ -244,6 +246,15 @@ export class HttpClient {
                 statusCode: 200,
                 errors: extracted.errors,
                 retryAfterMs: extracted.retryAfterMs,
+                raw: json,
+              },
+            );
+          }
+          if (extracted.authenticationFailed) {
+            throw new AuthenticationError(
+              extracted.message ?? "Carrier authentication failed",
+              {
+                carrier: this.config.carrier,
                 raw: json,
               },
             );

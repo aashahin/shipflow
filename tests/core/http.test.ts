@@ -12,7 +12,11 @@ import {
   mock,
   test,
 } from "bun:test";
-import { APIError, RateLimitError } from "../../src/core/errors";
+import {
+  APIError,
+  AuthenticationError,
+  RateLimitError,
+} from "../../src/core/errors";
 import { HttpClient } from "../../src/core/http";
 
 const originalFetch = globalThis.fetch;
@@ -128,5 +132,32 @@ describe("HttpClient Retry-After / rate limiting", () => {
     expect(err).toBeInstanceOf(RateLimitError);
     expect(err).toBeInstanceOf(APIError); // back-compat: still an APIError
     expect(err.statusCode).toBe(503);
+  });
+
+  test("maps an in-band authentication rejection to AuthenticationError", async () => {
+    const client = new HttpClient({ baseUrl: "https://x", carrier: "test" });
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ hasErrors: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const err = (await client
+      .post(
+        "/x",
+        {},
+        {
+          errorExtractor: () => ({
+            hasError: true,
+            authenticationFailed: true,
+            message: "Invalid credentials",
+          }),
+        },
+      )
+      .catch((error) => error)) as AuthenticationError;
+
+    expect(err).toBeInstanceOf(AuthenticationError);
+    expect(err.message).toBe("Invalid credentials");
   });
 });

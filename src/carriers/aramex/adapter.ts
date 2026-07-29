@@ -178,23 +178,21 @@ export class AramexAdapter extends BaseCarrierAdapter {
   }
 
   /**
-   * Extracts the Aramex "Fake 200 OK" error (envelope-level `HasErrors` +
-   * `Notifications`). Passed to every request so the HttpClient raises APIError.
-   */
-  /**
-   * Aramex reports throttling inside its "fake 200" envelope (and sometimes on a
-   * non-429 status) rather than via HTTP 429, so status-code detection misses it.
-   * Match the rate-limit wording in the notifications and flag it so the
-   * HttpClient raises a retryable `RateLimitError` instead of a plain APIError.
+   * Extracts Aramex's "fake 200" errors. Aramex reports both throttling and
+   * authentication failures inside the response envelope, so HTTP status-code
+   * handling alone cannot classify them correctly.
    */
   private static readonly RATE_LIMIT_PATTERN =
     /rate.?limit|too many request|throttl|quota exceeded/i;
+  private static readonly AUTHENTICATION_PATTERN =
+    /failed to login using portal service/i;
 
   private static aramexErrorExtractor(json: unknown): {
     hasError: boolean;
     message?: string;
     errors?: Record<string, string[]>;
     rateLimited?: boolean;
+    authenticationFailed?: boolean;
   } {
     const obj = json as {
       HasErrors?: boolean;
@@ -215,6 +213,12 @@ export class AramexAdapter extends BaseCarrierAdapter {
         : undefined,
       rateLimited:
         hasError && AramexAdapter.RATE_LIMIT_PATTERN.test(message ?? ""),
+      authenticationFailed:
+        hasError &&
+        (notifications.some(
+          (notification) => notification?.Code?.toUpperCase() === "ERR75",
+        ) ||
+          AramexAdapter.AUTHENTICATION_PATTERN.test(message ?? "")),
     };
   }
 
