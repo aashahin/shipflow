@@ -1,12 +1,10 @@
 // file: tests/smsaexpress/city-validation.test.ts
 /**
- * SMSA booking-time city validation tests.
+ * SMSA booking-time city normalization tests.
  *
- * SMSA's City field is list-validated server-side, so an unknown value used to
- * produce an opaque carrier rejection. The adapter now validates SA-address
- * cities against SMSA's own /api/lookup/cities list before booking: strict
- * rejection when the list is loaded, pass-through when the lookup is down,
- * untouched for non-SA addresses.
+ * The adapter normalizes cities found in SMSA's /api/lookup/cities list while
+ * passing unmatched values through to booking because that lookup is not
+ * exhaustive. Non-SA addresses remain untouched.
  */
 
 import {
@@ -19,7 +17,6 @@ import {
   test,
 } from "bun:test";
 import { SMSAExpressAdapter } from "../../src/carriers/smsaexpress";
-import { ValidationError } from "../../src/core/errors";
 import type { CreateShipmentInput } from "../../src/core/types";
 
 const originalFetch = globalThis.fetch;
@@ -70,7 +67,7 @@ function bookingCalls(): string[] {
     .filter((u) => u.includes("/api/shipment/b2c/new"));
 }
 
-describe("SMSA booking-time city validation", () => {
+describe("SMSA booking-time city normalization", () => {
   let adapter: SMSAExpressAdapter;
 
   beforeAll(() => {
@@ -107,29 +104,23 @@ describe("SMSA booking-time city validation", () => {
     expect(body.ConsigneeAddress.City).toBe("Jeddah");
   });
 
-  test("rejects an unknown SA city with a clear error before any booking call", async () => {
+  test("submits an unmatched SA city instead of blocking the booking", async () => {
     mockFetch.mockResolvedValueOnce(citiesLookup());
+    mockFetch.mockResolvedValueOnce(b2cResponse());
 
     const input = baseInput();
-    const attempt = adapter.createShipment({
+    await adapter.createShipment({
       ...input,
       consignee: { ...input.consignee, city: "Atlantis" },
     });
 
-    await expect(attempt).rejects.toThrow(ValidationError);
-    expect(bookingCalls()).toEqual([]);
-  });
-
-  test("names the offending side (shipper vs consignee) in the error", async () => {
-    mockFetch.mockResolvedValueOnce(citiesLookup());
-
-    const input = baseInput();
-    await expect(
-      adapter.createShipment({
-        ...input,
-        shipper: { ...input.shipper, city: "Nowhere" },
-      }),
-    ).rejects.toThrow('shipper city "Nowhere"');
+    const [, init] = mockFetch.mock.calls[1] as unknown as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(init.body as string);
+    expect(body.ConsigneeAddress.City).toBe("Atlantis");
+    expect(bookingCalls()).toHaveLength(1);
   });
 
   test("passes the city through verbatim when the cities lookup is down", async () => {

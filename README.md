@@ -207,8 +207,10 @@ const result = await aramex.track(shipment.trackingNumber);
 
 **Product group / type & payment** — ShipFlow infers `DOM` (domestic) when shipper and consignee
 share a country, else `EXP`, and picks a sensible default product type (`OND` for domestic, `EPX`
-for express). Override with `serviceType` (a valid Aramex code) or
-`options.metadata.productGroup` / `productType`.
+for express). Override with `serviceType` or `options.metadata.productType`; account- and
+region-specific product codes pass through without a local allowlist. Known types infer their
+standard group, while an unknown configured type uses `options.metadata.productGroup` when
+supplied and otherwise follows the domestic/cross-border route.
 
 The freight **`PaymentType`** — who pays the *shipping cost* — defaults to `P` and is independent
 of COD: enabling COD adds the `CODS` service and the cash amount to collect from the consignee, but

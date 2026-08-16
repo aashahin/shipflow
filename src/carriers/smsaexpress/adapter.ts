@@ -13,7 +13,6 @@ import {
   APIError,
   MalformedResponseError,
   RateLimitError,
-  ValidationError,
 } from "../../core/errors";
 import { HttpClient } from "../../core/http";
 import type {
@@ -145,30 +144,20 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
   }
 
   /**
-   * Validate/normalize a Saudi address city against SMSA's own city list
-   * before booking (SMSA's City field is list-validated server-side, so an
-   * unknown value previously produced an opaque carrier rejection). Strict:
-   * when the list is loaded and nothing matches, fail fast with a clear,
-   * field-scoped error. Lenient when the list is unavailable (outage) and for
-   * non-SA addresses, whose cities are not in the SA lookup.
+   * Normalize a Saudi address city against SMSA's own city list when a match
+   * exists. Unmatched values pass through because the lookup is not exhaustive
+   * and SMSA may still accept them during booking.
    */
-  private resolveCityStrict(
+  private resolveCity(
     address: CreateShipmentInput["shipper"] | CreateShipmentInput["consignee"],
-    field: "shipper.city" | "consignee.city",
   ): string {
     if (address.countryCode !== "SA") return address.city;
     if (!this.citiesCache || this.citiesCache.length === 0) return address.city;
     const match = findCityMatch(address.city, this.citiesCache);
-    if (!match) {
-      throw new ValidationError(
-        `Unknown ${field.replace(".city", "")} city "${address.city}": not in SMSA's supported city list`,
-        { field },
-      );
-    }
-    return match.nameEn;
+    return match?.nameEn ?? address.city.trim();
   }
 
-  /** Resolve shipper + consignee cities for a booking (strict — see above). */
+  /** Resolve shipper + consignee cities for a booking (lenient — see above). */
   private async resolveCitiesInInput(
     input: CreateShipmentInput,
   ): Promise<CreateShipmentInput> {
@@ -177,11 +166,11 @@ export class SMSAExpressAdapter extends BaseCarrierAdapter {
       ...input,
       shipper: {
         ...input.shipper,
-        city: this.resolveCityStrict(input.shipper, "shipper.city"),
+        city: this.resolveCity(input.shipper),
       },
       consignee: {
         ...input.consignee,
-        city: this.resolveCityStrict(input.consignee, "consignee.city"),
+        city: this.resolveCity(input.consignee),
       },
     };
   }

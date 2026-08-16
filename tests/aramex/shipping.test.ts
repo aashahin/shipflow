@@ -115,6 +115,19 @@ describe("AramexAdapter — shipping", () => {
       );
     });
 
+    test("puts the national short code on the carrier-visible address", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+      const input = baseInput();
+      input.consignee.nationalAddress = { shortCode: "RRRD2929" };
+
+      await adapter.createShipment(input);
+
+      const [, init] = firstCall();
+      const address = JSON.parse(init.body as string).Shipments[0].Consignee
+        .PartyAddress;
+      expect(address.Line2).toContain("RRRD2929");
+    });
+
     test("injects ClientInfo into the request body and sets no auth header", async () => {
       mockFetch.mockResolvedValueOnce(createOk());
 

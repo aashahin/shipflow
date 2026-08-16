@@ -143,10 +143,6 @@ function round(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
 
-const VALID_PRODUCT_TYPES = new Set(
-  Object.values(AramexProductType) as string[],
-);
-
 function getMeta(
   input: CreateShipmentInput,
   key: string,
@@ -158,14 +154,13 @@ function getMeta(
 /**
  * Resolve ProductGroup (DOM/EXP) and ProductType as a always-consistent pair.
  * Defaults to domestic when shipper and consignee share a country, else express.
- * Overridable via `serviceType` (a valid Aramex product code) or
- * `options.metadata`.
+ * Overridable via `serviceType` or `options.metadata`. Product codes are
+ * account/region-specific, so configured values pass through without a local
+ * allowlist.
  *
- * An explicit VALID product type dictates the group — DOM for `OND` (the only
- * domestic type; see services.ts), EXP for every other product type — and wins
- * over an explicit metadata `productGroup`. This keeps the DOM/EXP + type pair
- * valid, so an override can never form an invalid combo (e.g. DOM+PPX or
- * EXP+OND).
+ * Known product types infer their standard group. Unknown configured values use
+ * an explicit metadata `productGroup` when supplied, otherwise the domestic vs
+ * international route selects the group.
  */
 export function resolveProductGroupAndType(input: CreateShipmentInput): {
   productGroup: "EXP" | "DOM";
@@ -175,23 +170,26 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
     input.shipper.countryCode.trim().toUpperCase() ===
     input.consignee.countryCode.trim().toUpperCase();
 
-  const candidate = getMeta(input, "productType") ?? input.serviceType;
-  const validCandidate =
-    candidate && VALID_PRODUCT_TYPES.has(candidate) ? candidate : undefined;
-
-  const metaGroup = getMeta(input, "productGroup")?.toUpperCase();
-  const productGroup: "EXP" | "DOM" = validCandidate
-    ? validCandidate === AramexProductType.DOMESTIC
+  const configuredProductType = getMeta(input, "productType")?.trim();
+  const candidate =
+    (configuredProductType || input.serviceType)?.trim().toUpperCase() ||
+    undefined;
+  const metaGroup = getMeta(input, "productGroup")?.trim().toUpperCase();
+  const knownExpressType =
+    candidate !== undefined &&
+    candidate !== AramexProductType.DOMESTIC &&
+    (Object.values(AramexProductType) as string[]).includes(candidate);
+  const configuredGroup =
+    metaGroup === "EXP" || metaGroup === "DOM" ? metaGroup : undefined;
+  const productGroup: "EXP" | "DOM" =
+    candidate === AramexProductType.DOMESTIC
       ? "DOM"
-      : "EXP"
-    : metaGroup === "EXP" || metaGroup === "DOM"
-      ? metaGroup
-      : sameCountry
-        ? "DOM"
-        : "EXP";
+      : knownExpressType
+        ? "EXP"
+        : (configuredGroup ?? (sameCountry ? "DOM" : "EXP"));
 
   const productType =
-    validCandidate ??
+    candidate ??
     (productGroup === "DOM"
       ? AramexProductType.DOMESTIC
       : AramexProductType.ECONOMY_PARCEL_EXPRESS);
@@ -284,9 +282,14 @@ function buildPartyAddress(fields: {
 }
 
 function mapAddress(addr: Address): AramexPartyAddress {
+  const nationalAddressLine = addr.nationalAddress?.shortCode
+    ? `National Address: ${addr.nationalAddress.shortCode}`
+    : undefined;
   return buildPartyAddress({
     line1: addr.line1,
-    line2: addr.line2,
+    line2:
+      [addr.line2, nationalAddressLine].filter(Boolean).join(" | ") ||
+      undefined,
     line3: addr.neighbourhood,
     city: addr.city,
     state: addr.state,

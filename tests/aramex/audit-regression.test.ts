@@ -408,6 +408,12 @@ describe("Aramex audit regression", () => {
       // An explicit valid type dictates the group, so no invalid pair is formed:
       ["same-country + PPX", () => ({ ...sampleInput(), serviceType: "PPX" }), "EXP", "PPX"],
       ["cross-country + OND", () => ({ ...crossCountryInput(), serviceType: "OND" }), "DOM", "OND"],
+      [
+        "account-specific same-country product type",
+        () => ({ ...sampleInput(), serviceType: "onp" }),
+        "DOM",
+        "ONP",
+      ],
       // A valid type even overrides a conflicting metadata productGroup (DOM+PPX
       // would be invalid, so PPX forces EXP):
       [
@@ -415,7 +421,9 @@ describe("Aramex audit regression", () => {
         () => ({
           ...sampleInput(),
           serviceType: "PPX",
-          options: { metadata: { productGroup: "DOM" } },
+          options: {
+            metadata: { productGroup: " DOM ", productType: " " },
+          },
         }),
         "EXP",
         "PPX",
