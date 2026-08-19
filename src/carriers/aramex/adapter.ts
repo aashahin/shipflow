@@ -88,6 +88,86 @@ const EMPTY_TRANSACTION = {
   Reference5: "",
 } as const;
 
+const NESTED_NOTIFICATION_KEYS = [
+  "Shipments",
+  "ProcessedShipments",
+  "TrackingResults",
+  "ProcessedPickup",
+] as const;
+
+function readNotificationText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function isAramexNotification(value: unknown): value is AramexNotification {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return "Code" in candidate || "Message" in candidate;
+}
+
+/** Envelope, SOAP-wrapped `{ Notification: ... }`, or a single object. */
+function normalizeAramexNotifications(value: unknown): AramexNotification[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.filter(isAramexNotification);
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if ("Notification" in obj) {
+      return normalizeAramexNotifications(obj.Notification);
+    }
+    if (isAramexNotification(value)) return [value];
+  }
+  return [];
+}
+
+function formatAramexNotification(notification: AramexNotification): string {
+  const code = readNotificationText(notification.Code);
+  const message = readNotificationText(notification.Message);
+  if (code && message) return `${code}: ${message}`;
+  return message || code;
+}
+
+function formatAramexNotifications(notifications: AramexNotification[]): string {
+  return notifications.map(formatAramexNotification).filter(Boolean).join("; ");
+}
+
+/**
+ * Collect Notifications from the envelope and known nested shipment/pickup
+ * collections. Depth is capped so a malformed payload cannot walk forever.
+ */
+function collectAramexNotifications(json: unknown): AramexNotification[] {
+  const collected: AramexNotification[] = [];
+  const seen = new Set<string>();
+
+  const add = (items: AramexNotification[]) => {
+    for (const item of items) {
+      const key = `${readNotificationText(item.Code)}\0${readNotificationText(
+        item.Message,
+      )}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      collected.push(item);
+    }
+  };
+
+  const walk = (value: unknown, depth: number) => {
+    if (!value || typeof value !== "object" || depth > 5) return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth + 1);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    if ("Notifications" in obj) {
+      add(normalizeAramexNotifications(obj.Notifications));
+    }
+    for (const key of NESTED_NOTIFICATION_KEYS) {
+      if (obj[key] != null) walk(obj[key], depth + 1);
+    }
+  };
+
+  walk(json, 0);
+  return collected;
+}
+
 export interface AramexConfig extends CarrierConfig {
   credentials: {
     userName: string;
@@ -181,6 +261,15 @@ export class AramexAdapter extends BaseCarrierAdapter {
    * Extracts Aramex's "fake 200" errors. Aramex reports both throttling and
    * authentication failures inside the response envelope, so HTTP status-code
    * handling alone cannot classify them correctly.
+   *
+   * Notifications are collected from the envelope AND nested shipment/pickup
+   * objects. Aramex often sets envelope `HasErrors: true` with an empty
+   * `Notifications` array and puts the real reason on
+   * `Shipments[0].Notifications` — reading only the envelope produced the
+   * generic "Aramex returned an error". Nested `HasErrors` flags are NOT used
+   * to decide `hasError`: a pickup can succeed at the envelope (GUID issued)
+   * while individual processed shipments fail, and that path is handled after
+   * the HTTP call so the GUID is not lost.
    */
   private static readonly RATE_LIMIT_PATTERN =
     /rate.?limit|too many request|throttl|quota exceeded/i;
@@ -194,17 +283,12 @@ export class AramexAdapter extends BaseCarrierAdapter {
     rateLimited?: boolean;
     authenticationFailed?: boolean;
   } {
-    const obj = json as {
-      HasErrors?: boolean;
-      Notifications?: AramexNotification[];
-    } | null;
-    const notifications = obj?.Notifications ?? [];
+    const obj = json as { HasErrors?: boolean } | null;
+    const notifications = collectAramexNotifications(json);
     const hasError = obj?.HasErrors === true;
     const message =
-      notifications
-        .map((n) => n?.Message)
-        .filter(Boolean)
-        .join("; ") || (hasError ? "Aramex returned an error" : undefined);
+      formatAramexNotifications(notifications) ||
+      (hasError ? "Aramex returned an error" : undefined);
     return {
       hasError,
       message,
@@ -226,9 +310,9 @@ export class AramexAdapter extends BaseCarrierAdapter {
     notifications: AramexNotification[],
   ): Record<string, string[]> {
     return {
-      _aramex: notifications.map((n) =>
-        `${n?.Code ?? ""}: ${n?.Message ?? ""}`.trim(),
-      ),
+      _aramex: notifications
+        .map((n) => formatAramexNotification(n))
+        .filter(Boolean),
     };
   }
 
@@ -266,12 +350,9 @@ export class AramexAdapter extends BaseCarrierAdapter {
 
     // CreateShipments can also fail per-shipment while the envelope is clean.
     if (processed.HasErrors) {
-      const notifications = processed.Notifications ?? [];
+      const notifications = collectAramexNotifications(processed);
       throw new APIError(
-        notifications
-          .map((n) => n.Message)
-          .filter(Boolean)
-          .join("; ") || "Failed to create shipment",
+        formatAramexNotifications(notifications) || "Failed to create shipment",
         {
           carrier: "aramex",
           errors: AramexAdapter.notificationsToErrors(notifications),
@@ -332,12 +413,9 @@ export class AramexAdapter extends BaseCarrierAdapter {
 
     const failed = processed.filter((p) => p.HasErrors);
     if (failed.length > 0) {
-      const notifications = failed.flatMap((p) => p.Notifications ?? []);
+      const notifications = collectAramexNotifications({ Shipments: failed });
       throw new APIError(
-        notifications
-          .map((n) => n.Message)
-          .filter(Boolean)
-          .join("; ") ||
+        formatAramexNotifications(notifications) ||
           `Failed to create ${failed.length} of ${processed.length} shipments`,
         {
           carrier: "aramex",
@@ -517,12 +595,11 @@ export class AramexAdapter extends BaseCarrierAdapter {
       (s) => s.HasErrors,
     );
     if (failedShipments.length > 0) {
-      const notifications = failedShipments.flatMap((s) => s.Notifications ?? []);
+      const notifications = collectAramexNotifications({
+        ProcessedShipments: failedShipments,
+      });
       throw new APIError(
-        notifications
-          .map((n) => n.Message)
-          .filter(Boolean)
-          .join("; ") ||
+        formatAramexNotifications(notifications) ||
           `Pickup created but ${failedShipments.length} shipment(s) failed`,
         {
           carrier: "aramex",

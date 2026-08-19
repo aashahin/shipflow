@@ -169,6 +169,57 @@ describe("AramexAdapter — shipping", () => {
       );
     });
 
+    test("surfaces nested shipment Notifications when the envelope HasErrors with an empty list", async () => {
+      // Aramex often sets envelope HasErrors:true with Notifications:[] and
+      // puts the real reason on Shipments[0].Notifications. Dropping those
+      // produced the generic "Aramex returned an error" in production logs.
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: true,
+          Notifications: [],
+          Shipments: [
+            {
+              ID: "",
+              HasErrors: true,
+              Notifications: [
+                {
+                  Code: "ERR12",
+                  Message: "Destination city is not covered",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      const error = await adapter
+        .createShipment(baseInput())
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(APIError);
+      expect((error as APIError).message).toContain(
+        "Destination city is not covered",
+      );
+      expect((error as APIError).errors?._aramex?.join(" ")).toContain("ERR12");
+    });
+
+    test("uses the notification Code when nested Message is empty", async () => {
+      mockFetch.mockResolvedValueOnce(
+        json({
+          HasErrors: true,
+          Notifications: [],
+          Shipments: [
+            {
+              ID: "",
+              HasErrors: true,
+              Notifications: [{ Code: "ERR32", Message: "" }],
+            },
+          ],
+        }),
+      );
+
+      await expect(adapter.createShipment(baseInput())).rejects.toThrow("ERR32");
+    });
+
     test("throws APIError on per-shipment HasErrors even when envelope is clean", async () => {
       mockFetch.mockResolvedValueOnce(
         json({
