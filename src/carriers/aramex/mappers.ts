@@ -200,15 +200,8 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
 /**
  * Resolve the freight PaymentType — who pays the SHIPPING cost: P = prepaid
  * (billed to the shipper's Aramex account), C = collect (charged to the
- * consignee).
- *
- * "3" (third party) is intentionally NOT selectable here: Aramex's
- * ThirdParty payer requires a full `ThirdParty` party (address + contact) on
- * the shipment, which the unified `CreateShipmentInput` has no field to
- * supply — `mapCreateShipmentRequest` always sends `ThirdParty: null`. Letting
- * callers pick PaymentType "3" via metadata would silently produce an invalid
- * combination (third-party payer, no third party), so the override is
- * restricted to the two payment types we can actually satisfy.
+ * consignee), 3 = third party (billed to the authenticated Aramex account
+ * while the shipment is collected from a different shipper location).
  *
  * This is INDEPENDENT of COD. COD is the cash collected from the consignee for
  * the goods, carried by the `CODS` service + `CashOnDeliveryAmount` — not by
@@ -217,9 +210,9 @@ export function resolveProductGroupAndType(input: CreateShipmentInput): {
  * defaults to "P". Enabling COD must NOT force freight onto the consignee.
  * Override the freight payer with `options.metadata.paymentType`.
  */
-function resolvePaymentType(input: CreateShipmentInput): "P" | "C" {
+function resolvePaymentType(input: CreateShipmentInput): "P" | "C" | "3" {
   const meta = getMeta(input, "paymentType");
-  if (meta === "P" || meta === "C") return meta;
+  if (meta === "P" || meta === "C" || meta === "3") return meta;
   return "P";
 }
 
@@ -425,9 +418,19 @@ export function mapCreateShipmentRequest(
   return {
     Reference1: input.reference,
     Reference2: input.options?.customerTracking,
-    Shipper: mapParty(input.shipper, ctx.accountNumber, ctx.companyName),
+    // For third-party billing the physical shipper is not the account holder.
+    // Put the authenticated billing account on ThirdParty instead, as required
+    // by Aramex when PaymentType is "3".
+    Shipper: mapParty(
+      input.shipper,
+      paymentType === "3" ? undefined : ctx.accountNumber,
+      ctx.companyName,
+    ),
     Consignee: mapParty(input.consignee),
-    ThirdParty: null,
+    ThirdParty:
+      paymentType === "3"
+        ? mapParty(input.shipper, ctx.accountNumber, ctx.companyName)
+        : null,
     ShippingDateTime: toWcfDate(now),
     DueDate: toWcfDate(due),
     Comments: getMeta(input, "comments"),

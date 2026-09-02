@@ -243,6 +243,9 @@ await aramex.createShipment({
 });
 ```
 
+For `PaymentType: "3"`, ShipFlow keeps the physical pickup address as the `Shipper`
+and identifies the authenticated Aramex account in the required `ThirdParty` party.
+
 > Aramex does not push webhooks — poll `track()` / `trackMultiple()` for status updates.
 > Tracking `UpdateCode`s vary by region and aren't fully published, so ShipFlow maps known codes
 > and falls back to a description-keyword heuristic (then `"unknown"`) — an unmapped code never

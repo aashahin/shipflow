@@ -277,6 +277,25 @@ describe("AramexAdapter — shipping", () => {
       expect(details.PaymentType).toBe("C");
     });
 
+    test("maps third-party freight billing to the authenticated account", async () => {
+      mockFetch.mockResolvedValueOnce(createOk());
+
+      await adapter.createShipment({
+        ...baseInput(),
+        options: { metadata: { paymentType: "3" } },
+      });
+
+      const [, init] = firstCall();
+      const shipment = JSON.parse(init.body as string).Shipments[0];
+      expect(shipment.Details.PaymentType).toBe("3");
+      expect(shipment.Shipper.AccountNumber).toBeUndefined();
+      expect(shipment.ThirdParty.AccountNumber).toBe("12345");
+      expect(shipment.ThirdParty.PartyAddress).toEqual(
+        shipment.Shipper.PartyAddress,
+      );
+      expect(shipment.ThirdParty.Contact).toEqual(shipment.Shipper.Contact);
+    });
+
     test("infers domestic ProductGroup/Type for same-country shipments", async () => {
       mockFetch.mockResolvedValueOnce(createOk());
 

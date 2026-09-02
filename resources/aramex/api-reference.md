@@ -113,6 +113,8 @@ change it, since COD only adds the `CODS` service + `CashOnDeliveryAmount` to co
 the goods value from the consignee. This matches KSA/GCC e-commerce, where the
 merchant prepays freight and Aramex collects cash on delivery. Override via
 `options.metadata.paymentType` (e.g. `"C"` to charge freight to the consignee).
+When set to `"3"`, the authenticated billing account is sent in the shipment's
+required `ThirdParty` party while `Shipper` remains the physical pickup party.
 
 ### Special services
 Joined comma-separated into `Details.Services`: `CODS` (cash on delivery), `INSR` (insurance).
